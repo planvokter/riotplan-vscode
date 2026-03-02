@@ -2,7 +2,7 @@
   "name": "riotplan-vscode",
   "displayName": "RiotPlan",
   "description": "Plan management for RiotPlan HTTP server",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "publisher": "kjerneverk",
   "engines": {
     "vscode": "^1.60.0"
@@ -20,7 +20,7 @@
       "properties": {
         "riotplan.serverUrl": {
           "type": "string",
-          "default": "http://127.0.0.1:3002",
+          "default": "http://127.0.0.1:3001",
           "description": "RiotPlan HTTP MCP server URL"
         }
       }

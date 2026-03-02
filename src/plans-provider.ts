@@ -282,7 +282,10 @@ export class PlansTreeProvider implements vscode.TreeDataProvider<PlanItem>, vsc
             vscode.window.showInformationMessage('Selected plans are already in that category.');
         }
         if (errors.length > 0) {
-            vscode.window.showErrorMessage(`Failed to move ${errors.length} plan(s). Check logs for details.`);
+            const summary = errors.length === 1
+                ? errors[0]
+                : `${errors.length} plan(s) failed: ${errors.join('; ')}`;
+            vscode.window.showErrorMessage(`Failed to move: ${summary}`);
             console.error('Failed to move plans:', errors);
         }
     }

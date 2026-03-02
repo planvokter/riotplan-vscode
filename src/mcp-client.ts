@@ -304,13 +304,38 @@ export class HttpMcpClient {
         filter?: 'all' | 'active' | 'done' | 'hold',
         workspaceId?: string
     ): Promise<any> {
-        return await this.sendRequest('tools/call', {
-            name: 'riotplan_list_plans',
-            arguments: {
-                ...(filter ? { filter } : {}),
-                ...(workspaceId ? { workspaceId } : {}),
-            },
-        });
+        const args = {
+            ...(filter ? { filter } : {}),
+            ...(workspaceId ? { workspaceId } : {}),
+        };
+        try {
+            return await this.sendRequest('tools/call', {
+                name: 'riotplan_list_plans',
+                arguments: args,
+            });
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            const isUnknownListTool = message.toLowerCase().includes('unknown tool')
+                && message.toLowerCase().includes('riotplan_list_plans');
+            if (!isUnknownListTool) {
+                throw error;
+            }
+
+            // Compatibility fallback for old RiotPlan servers.
+            try {
+                return await this.sendRequest('tools/call', {
+                    name: 'riotplan_plan',
+                    arguments: { action: 'list', ...args },
+                });
+            } catch {
+                const toolNames = await this.listAvailableToolNamesSafe();
+                throw new Error(
+                    `Connected MCP server at ${this.baseUrl} does not expose RiotPlan plan-list tools. ` +
+                        `Expected 'riotplan_list_plans'. ` +
+                        `Available tools: ${toolNames.length > 0 ? toolNames.slice(0, 10).join(', ') : '(none)'}`
+                );
+            }
+        }
     }
 
     async listPlansFiltered(
@@ -662,6 +687,31 @@ export class HttpMcpClient {
             });
         } catch {
             return false;
+        }
+    }
+
+    async verifyRiotPlanServer(): Promise<{ ok: boolean; reason?: string }> {
+        const healthy = await this.healthCheck();
+        if (!healthy) {
+            return { ok: false, reason: 'server_unreachable' };
+        }
+        const tools = await this.listAvailableToolNamesSafe();
+        const hasRiotPlanTool = tools.some((name) => name.startsWith('riotplan_'));
+        if (!hasRiotPlanTool) {
+            return { ok: false, reason: 'missing_riotplan_tools' };
+        }
+        return { ok: true };
+    }
+
+    private async listAvailableToolNamesSafe(): Promise<string[]> {
+        try {
+            const result = await this.sendRequest('tools/list');
+            const rawTools = Array.isArray(result?.tools) ? result.tools : [];
+            return rawTools
+                .map((tool: any) => (typeof tool?.name === 'string' ? tool.name : ''))
+                .filter((name: string) => Boolean(name));
+        } catch {
+            return [];
         }
     }
 
