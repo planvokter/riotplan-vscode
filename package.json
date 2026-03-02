@@ -2,7 +2,7 @@
   "name": "riotplan-vscode",
   "displayName": "RiotPlan",
   "description": "Plan management for RiotPlan HTTP server",
-  "version": "1.0.5-dev.0",
+  "version": "1.0.5",
   "publisher": "kjerneverk",
   "engines": {
     "vscode": "^1.60.0"
