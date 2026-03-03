@@ -145,6 +145,7 @@ export class ProjectDetailPanel {
     static createOrShow(projectId: string, client: HttpMcpClient, initialProject?: ProjectLike): void {
         const existing = this.panels.get(projectId);
         if (existing) {
+            existing.updateClient(client);
             existing.panel.reveal(vscode.ViewColumn.Beside);
             void existing.refresh();
             return;
@@ -164,10 +165,16 @@ export class ProjectDetailPanel {
         this.panels.set(projectId, instance);
     }
 
+    static updateClientForAll(client: HttpMcpClient): void {
+        for (const panel of this.panels.values()) {
+            panel.updateClient(client);
+        }
+    }
+
     private constructor(
         private readonly panel: vscode.WebviewPanel,
         private readonly projectId: string,
-        private readonly client: HttpMcpClient,
+        private client: HttpMcpClient,
         private initialProject?: ProjectLike
     ) {
         this.panel.onDidDispose(() => {
@@ -183,6 +190,10 @@ export class ProjectDetailPanel {
             }
         });
         void this.refresh();
+    }
+
+    private updateClient(client: HttpMcpClient): void {
+        this.client = client;
     }
 
     private async refresh(): Promise<void> {

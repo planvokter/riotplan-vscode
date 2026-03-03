@@ -20,8 +20,13 @@
       "properties": {
         "riotplan.serverUrl": {
           "type": "string",
-          "default": "http://127.0.0.1:3001",
+          "default": "http://127.0.0.1:3002",
           "description": "RiotPlan HTTP MCP server URL"
+        },
+        "riotplan.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "Optional API key sent as Authorization: Bearer and X-API-Key headers for secured RiotPlan HTTP servers."
         }
       }
     },

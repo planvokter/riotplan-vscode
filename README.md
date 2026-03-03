@@ -22,6 +22,26 @@ VSCode extension for managing RiotPlan plans via HTTP MCP server.
 This extension contributes the following settings:
 
 * `riotplan.serverUrl`: RiotPlan HTTP MCP server URL (default: `http://127.0.0.1:3002`)
+* `riotplan.apiKey`: Optional API key used for secured RiotPlan servers. Sent as both:
+  * `Authorization: Bearer <key>`
+  * `X-API-Key: <key>`
+
+### Example configuration (without security)
+
+```json
+{
+  "riotplan.serverUrl": "http://127.0.0.1:3002"
+}
+```
+
+### Example configuration (with security enabled)
+
+```json
+{
+  "riotplan.serverUrl": "https://riotplan-mcp-xxxxx-uc.a.run.app",
+  "riotplan.apiKey": "rp-REPLACE-WITH-YOUR-KEY"
+}
+```
 
 ## Usage
 

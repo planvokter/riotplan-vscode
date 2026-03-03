@@ -45,10 +45,17 @@ export class HttpMcpClient {
     private recoveringSession = false;
     private onSessionRecoveredCallbacks: Array<() => void | Promise<void>> = [];
 
-    constructor(private serverUrl: string) {}
+    constructor(
+        private serverUrl: string,
+        private apiKey?: string
+    ) {}
 
     get baseUrl(): string {
         return this.serverUrl;
+    }
+
+    setApiKey(apiKey?: string): void {
+        this.apiKey = apiKey?.trim() || undefined;
     }
 
     onSessionRecovered(callback: () => void | Promise<void>): () => void {
@@ -174,6 +181,7 @@ export class HttpMcpClient {
                     'Accept': 'application/json, text/event-stream',
                     'Content-Length': Buffer.byteLength(postData),
                     ...(this.sessionId ? { 'Mcp-Session-Id': this.sessionId } : {}),
+                    ...this.getAuthHeaders(),
                 },
             };
 
@@ -233,7 +241,10 @@ export class HttpMcpClient {
                     port: url.port || (isHttps ? 443 : 80),
                     path: url.pathname + url.search,
                     method,
-                    headers: options?.headers || {},
+                    headers: {
+                        ...this.getAuthHeaders(),
+                        ...(options?.headers || {}),
+                    },
                 },
                 (res) => {
                     const chunks: Buffer[] = [];
@@ -672,7 +683,7 @@ export class HttpMcpClient {
             const client = isHttps ? https : http;
 
             return new Promise((resolve) => {
-                const req = client.get(url, (res) => {
+                const req = client.get(url, { headers: this.getAuthHeaders() }, (res) => {
                     resolve(res.statusCode === 200);
                 });
 
@@ -809,6 +820,7 @@ export class HttpMcpClient {
                     Accept: 'text/event-stream',
                     'Cache-Control': 'no-cache',
                     'Mcp-Session-Id': this.sessionId,
+                    ...this.getAuthHeaders(),
                 },
             },
             (res) => {
@@ -875,6 +887,16 @@ export class HttpMcpClient {
         } catch {
             // Ignore non-JSON ping/comment payloads
         }
+    }
+
+    private getAuthHeaders(): Record<string, string> {
+        if (!this.apiKey) {
+            return {};
+        }
+        return {
+            Authorization: `Bearer ${this.apiKey}`,
+            'X-API-Key': this.apiKey,
+        };
     }
 
     dispose(): void {

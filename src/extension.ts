@@ -60,17 +60,18 @@ let plansProvider: PlansTreeProvider;
 let projectsProvider: ProjectsTreeProvider;
 let statusProvider: StatusTreeProvider;
 let dashboardProvider: DashboardViewProvider;
-let currentServerUrl = 'http://127.0.0.1:3001';
+let currentServerUrl = 'http://127.0.0.1:3002';
 let extensionContextRef: vscode.ExtensionContext;
+let currentApiKey: string | undefined;
 
 export async function activate(context: vscode.ExtensionContext) {
     console.log('RiotPlan extension is now active');
     extensionContextRef = context;
 
-    const config = vscode.workspace.getConfiguration('riotplan');
-    currentServerUrl = config.get<string>('serverUrl', 'http://127.0.0.1:3001');
+    currentServerUrl = getConfiguredServerUrl();
+    currentApiKey = getConfiguredApiKey();
 
-    mcpClient = new HttpMcpClient(currentServerUrl);
+    mcpClient = new HttpMcpClient(currentServerUrl, currentApiKey);
     plansProvider = new PlansTreeProvider(mcpClient);
     projectsProvider = new ProjectsTreeProvider(mcpClient);
     statusProvider = new StatusTreeProvider(mcpClient, currentServerUrl);
@@ -86,13 +87,16 @@ export async function activate(context: vscode.ExtensionContext) {
         });
     }
 
-    function applyServerUrl(newUrl: string): void {
+    function applyConnectionSettings(newUrl: string, apiKey?: string): void {
         currentServerUrl = newUrl;
-        mcpClient = new HttpMcpClient(newUrl);
+        currentApiKey = apiKey?.trim() || undefined;
+        mcpClient = new HttpMcpClient(newUrl, currentApiKey);
         plansProvider.updateClient(mcpClient);
         statusProvider.updateClient(mcpClient, newUrl);
         dashboardProvider.setClient(mcpClient);
         projectsProvider.updateClient(mcpClient);
+        PlanDetailPanel.updateClientForAll(mcpClient);
+        ProjectDetailPanel.updateClientForAll(mcpClient);
         syncDashboardFilters();
         plansProvider.refresh();
         projectsProvider.refresh();
@@ -284,7 +288,7 @@ export async function activate(context: vscode.ExtensionContext) {
                 title: 'RiotPlan Server URL',
                 prompt: 'Set RiotPlan HTTP MCP server URL',
                 value: currentServerUrl,
-                placeHolder: 'http://127.0.0.1:3001',
+                placeHolder: 'http://127.0.0.1:3002',
                 validateInput: (value) => {
                     try {
                         const parsed = new URL(value.trim());
@@ -312,7 +316,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
             await config.update('serverUrl', nextUrl, target);
             // Apply immediately so the active session switches even before configuration events propagate.
-            applyServerUrl(nextUrl);
+            applyConnectionSettings(nextUrl, getConfiguredApiKey());
         })
     );
 
@@ -497,14 +501,38 @@ export async function activate(context: vscode.ExtensionContext) {
     // Watch for configuration changes
     context.subscriptions.push(
         vscode.workspace.onDidChangeConfiguration((e) => {
-            if (e.affectsConfiguration('riotplan.serverUrl')) {
-                const newUrl = vscode.workspace
-                    .getConfiguration('riotplan')
-                    .get<string>('serverUrl', 'http://127.0.0.1:3001');
-                applyServerUrl(newUrl);
+            if (e.affectsConfiguration('riotplan.serverUrl') || e.affectsConfiguration('riotplan.apiKey')) {
+                const cfg = vscode.workspace.getConfiguration('riotplan');
+                const newUrl = getConfiguredServerUrl();
+                const apiKey = getConfiguredApiKey();
+                applyConnectionSettings(newUrl, apiKey);
             }
         })
     );
+}
+
+function getConfiguredServerUrl(): string {
+    const folderUri = vscode.workspace.workspaceFolders?.[0]?.uri;
+    if (folderUri) {
+        const folderValue = vscode.workspace.getConfiguration('riotplan', folderUri).get<string>('serverUrl');
+        if (typeof folderValue === 'string' && folderValue.trim()) {
+            return folderValue.trim();
+        }
+    }
+    const globalValue = vscode.workspace.getConfiguration('riotplan').get<string>('serverUrl', 'http://127.0.0.1:3002');
+    return globalValue.trim() || 'http://127.0.0.1:3002';
+}
+
+function getConfiguredApiKey(): string | undefined {
+    const folderUri = vscode.workspace.workspaceFolders?.[0]?.uri;
+    if (folderUri) {
+        const folderValue = vscode.workspace.getConfiguration('riotplan', folderUri).get<string>('apiKey');
+        if (typeof folderValue === 'string' && folderValue.trim()) {
+            return folderValue.trim();
+        }
+    }
+    const value = vscode.workspace.getConfiguration('riotplan').get<string>('apiKey', '').trim();
+    return value || undefined;
 }
 
 async function openPlan(plan: PlanItem | any): Promise<void> {
