@@ -15,6 +15,7 @@ export class PlanDetailPanel {
     private readonly _panel: vscode.WebviewPanel;
     private _disposables: vscode.Disposable[] = [];
     private readonly resourceUri: string;
+    private mcpClient: HttpMcpClient;
     private unsubscribeNotification?: () => void;
     private unsubscribeSessionRecovered?: () => void;
     private refreshTimer?: ReturnType<typeof setTimeout>;
@@ -23,10 +24,11 @@ export class PlanDetailPanel {
     private constructor(
         panel: vscode.WebviewPanel,
         private readonly planPath: string,
-        private readonly mcpClient: HttpMcpClient,
+        mcpClient: HttpMcpClient,
         private readonly initialProject?: any
     ) {
         this._panel = panel;
+        this.mcpClient = mcpClient;
         this.resourceUri = `riotplan://plan/${this.planPath}`;
         this._panel.onDidDispose(() => this.dispose(), null, this._disposables);
         this._panel.webview.onDidReceiveMessage(
@@ -34,6 +36,17 @@ export class PlanDetailPanel {
             null,
             this._disposables
         );
+        this.bindClientSubscriptions();
+        this._loadContent();
+    }
+
+    static updateClientForAll(mcpClient: HttpMcpClient): void {
+        for (const panel of PlanDetailPanel.currentPanels.values()) {
+            panel.updateClient(mcpClient);
+        }
+    }
+
+    private bindClientSubscriptions(): void {
         this.unsubscribeNotification = this.mcpClient.onNotification(
             'notifications/resource_changed',
             async (data: unknown) => {
@@ -47,7 +60,23 @@ export class PlanDetailPanel {
             await this.subscribeToPlanResources();
         });
         void this.subscribeToPlanResources();
-        this._loadContent();
+    }
+
+    private updateClient(mcpClient: HttpMcpClient): void {
+        if (this.mcpClient === mcpClient) {
+            return;
+        }
+        this.unsubscribeNotification?.();
+        this.unsubscribeNotification = undefined;
+        this.unsubscribeSessionRecovered?.();
+        this.unsubscribeSessionRecovered = undefined;
+        for (const uri of this.subscribedResourceUris) {
+            void this.mcpClient.unsubscribeFromResource(uri).catch(() => undefined);
+        }
+        this.subscribedResourceUris.clear();
+        this.mcpClient = mcpClient;
+        this.bindClientSubscriptions();
+        this.scheduleRefresh();
     }
 
     static createOrShow(
@@ -60,6 +89,7 @@ export class PlanDetailPanel {
 
         const existing = PlanDetailPanel.currentPanels.get(planPath);
         if (existing) {
+            existing.updateClient(mcpClient);
             existing._panel.reveal(column);
             existing._panel.title = planName;
             return;
