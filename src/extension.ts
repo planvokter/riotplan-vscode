@@ -63,6 +63,7 @@ let dashboardProvider: DashboardViewProvider;
 let currentServerUrl = 'http://127.0.0.1:3002';
 let extensionContextRef: vscode.ExtensionContext;
 let currentApiKey: string | undefined;
+let currentProxyBypass = false;
 
 export async function activate(context: vscode.ExtensionContext) {
     console.log('RiotPlan extension is now active');
@@ -70,8 +71,9 @@ export async function activate(context: vscode.ExtensionContext) {
 
     currentServerUrl = getConfiguredServerUrl();
     currentApiKey = getConfiguredApiKey();
+    currentProxyBypass = getConfiguredProxyBypass();
 
-    mcpClient = new HttpMcpClient(currentServerUrl, currentApiKey);
+    mcpClient = new HttpMcpClient(currentServerUrl, currentApiKey, currentProxyBypass);
     plansProvider = new PlansTreeProvider(mcpClient);
     projectsProvider = new ProjectsTreeProvider(mcpClient);
     statusProvider = new StatusTreeProvider(mcpClient, currentServerUrl);
@@ -87,10 +89,11 @@ export async function activate(context: vscode.ExtensionContext) {
         });
     }
 
-    function applyConnectionSettings(newUrl: string, apiKey?: string): void {
+    function applyConnectionSettings(newUrl: string, apiKey?: string, proxyBypass?: boolean): void {
         currentServerUrl = newUrl;
         currentApiKey = apiKey?.trim() || undefined;
-        mcpClient = new HttpMcpClient(newUrl, currentApiKey);
+        currentProxyBypass = proxyBypass ?? currentProxyBypass;
+        mcpClient = new HttpMcpClient(newUrl, currentApiKey, currentProxyBypass);
         plansProvider.updateClient(mcpClient);
         statusProvider.updateClient(mcpClient, newUrl);
         dashboardProvider.setClient(mcpClient);
@@ -315,8 +318,7 @@ export async function activate(context: vscode.ExtensionContext) {
                         : vscode.ConfigurationTarget.Global;
 
             await config.update('serverUrl', nextUrl, target);
-            // Apply immediately so the active session switches even before configuration events propagate.
-            applyConnectionSettings(nextUrl, getConfiguredApiKey());
+            applyConnectionSettings(nextUrl, getConfiguredApiKey(), getConfiguredProxyBypass());
         })
     );
 
@@ -501,11 +503,15 @@ export async function activate(context: vscode.ExtensionContext) {
     // Watch for configuration changes
     context.subscriptions.push(
         vscode.workspace.onDidChangeConfiguration((e) => {
-            if (e.affectsConfiguration('riotplan.serverUrl') || e.affectsConfiguration('riotplan.apiKey')) {
-                const cfg = vscode.workspace.getConfiguration('riotplan');
+            if (
+                e.affectsConfiguration('riotplan.serverUrl') ||
+                e.affectsConfiguration('riotplan.apiKey') ||
+                e.affectsConfiguration('riotplan.proxyBypass')
+            ) {
                 const newUrl = getConfiguredServerUrl();
                 const apiKey = getConfiguredApiKey();
-                applyConnectionSettings(newUrl, apiKey);
+                const proxyBypass = getConfiguredProxyBypass();
+                applyConnectionSettings(newUrl, apiKey, proxyBypass);
             }
         })
     );
@@ -521,6 +527,17 @@ function getConfiguredServerUrl(): string {
     }
     const globalValue = vscode.workspace.getConfiguration('riotplan').get<string>('serverUrl', 'http://127.0.0.1:3002');
     return globalValue.trim() || 'http://127.0.0.1:3002';
+}
+
+function getConfiguredProxyBypass(): boolean {
+    const folderUri = vscode.workspace.workspaceFolders?.[0]?.uri;
+    if (folderUri) {
+        const folderValue = vscode.workspace.getConfiguration('riotplan', folderUri).get<boolean>('proxyBypass');
+        if (typeof folderValue === 'boolean') {
+            return folderValue;
+        }
+    }
+    return vscode.workspace.getConfiguration('riotplan').get<boolean>('proxyBypass', false);
 }
 
 function getConfiguredApiKey(): string | undefined {

@@ -27,6 +27,11 @@
           "type": "string",
           "default": "",
           "description": "Optional API key sent as Authorization: Bearer and X-API-Key headers for secured RiotPlan HTTP servers."
+        },
+        "riotplan.proxyBypass": {
+          "type": "boolean",
+          "default": false,
+          "description": "Bypass system/corporate proxy when connecting to the RiotPlan server. Enable this if your RiotPlan server is accessible directly but blocked by a corporate proxy."
         }
       }
     },
@@ -251,5 +256,8 @@
     "url": "https://github.com/kjerneverk/riotplan-vscode"
   },
   "license": "Apache-2.0",
-  "author": "Tim O'Brien <tobrien@discursive.com>"
+  "author": "Tim O'Brien <tobrien@discursive.com>",
+  "dependencies": {
+    "https-proxy-agent": "^7.0.6"
+  }
 }

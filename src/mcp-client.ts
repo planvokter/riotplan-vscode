@@ -7,6 +7,7 @@
 import * as http from 'http';
 import * as https from 'https';
 import { URL } from 'url';
+import { getProxyAgent } from './proxyUtils';
 
 interface McpRequest {
     jsonrpc: '2.0';
@@ -47,7 +48,8 @@ export class HttpMcpClient {
 
     constructor(
         private serverUrl: string,
-        private apiKey?: string
+        private apiKey?: string,
+        private proxyBypass = false
     ) {}
 
     get baseUrl(): string {
@@ -169,8 +171,9 @@ export class HttpMcpClient {
             const client = isHttps ? https : http;
 
             const postData = JSON.stringify(body);
+            const proxyAgent = getProxyAgent(url.toString(), this.proxyBypass);
 
-            const options = {
+            const options: http.RequestOptions = {
                 hostname: url.hostname,
                 port: url.port || (isHttps ? 443 : 80),
                 path: url.pathname,
@@ -183,6 +186,7 @@ export class HttpMcpClient {
                     ...(this.sessionId ? { 'Mcp-Session-Id': this.sessionId } : {}),
                     ...this.getAuthHeaders(),
                 },
+                ...(proxyAgent ? { agent: proxyAgent } : {}),
             };
 
             const req = client.request(options, (res) => {
@@ -235,6 +239,7 @@ export class HttpMcpClient {
             const url = new URL(this.serverUrl + path);
             const isHttps = url.protocol === 'https:';
             const client = isHttps ? https : http;
+            const proxyAgent = getProxyAgent(url.toString(), this.proxyBypass);
             const req = client.request(
                 {
                     hostname: url.hostname,
@@ -245,6 +250,7 @@ export class HttpMcpClient {
                         ...this.getAuthHeaders(),
                         ...(options?.headers || {}),
                     },
+                    ...(proxyAgent ? { agent: proxyAgent } : {}),
                 },
                 (res) => {
                     const chunks: Buffer[] = [];
@@ -681,9 +687,13 @@ export class HttpMcpClient {
             const url = new URL(this.serverUrl + '/health');
             const isHttps = url.protocol === 'https:';
             const client = isHttps ? https : http;
+            const proxyAgent = getProxyAgent(url.toString(), this.proxyBypass);
 
             return new Promise((resolve) => {
-                const req = client.get(url, { headers: this.getAuthHeaders() }, (res) => {
+                const req = client.get(url, {
+                    headers: this.getAuthHeaders(),
+                    ...(proxyAgent ? { agent: proxyAgent } : {}),
+                }, (res) => {
                     resolve(res.statusCode === 200);
                 });
 
@@ -810,6 +820,7 @@ export class HttpMcpClient {
         const url = new URL(`${this.serverUrl}/mcp`);
         const isHttps = url.protocol === 'https:';
         const client = isHttps ? https : http;
+        const proxyAgent = getProxyAgent(url.toString(), this.proxyBypass);
         const req = client.request(
             {
                 hostname: url.hostname,
@@ -822,6 +833,7 @@ export class HttpMcpClient {
                     'Mcp-Session-Id': this.sessionId,
                     ...this.getAuthHeaders(),
                 },
+                ...(proxyAgent ? { agent: proxyAgent } : {}),
             },
             (res) => {
                 if (res.statusCode !== 200) {
