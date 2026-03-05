@@ -677,6 +677,22 @@ export class HttpMcpClient {
         return result;
     }
 
+    private async sleep(ms: number): Promise<void> {
+        await new Promise((resolve) => setTimeout(resolve, ms));
+    }
+
+    private isTransientEvidenceDeleteError(error: unknown): boolean {
+        const message = String(error || '').toLowerCase();
+        const isSyncIndexTmpRace =
+            message.includes('enoent')
+            && message.includes('sync-index')
+            && message.includes('.tmp');
+        return isSyncIndexTmpRace
+            || message.includes('sqlite_busy')
+            || message.includes('database is locked')
+            || message.includes('resource temporarily unavailable');
+    }
+
     async removeEvidence(planPathOrId: string, evidenceRefValue: string): Promise<any> {
         const trimmedRef = typeof evidenceRefValue === 'string' ? evidenceRefValue.trim() : '';
         if (!trimmedRef) {
@@ -691,25 +707,32 @@ export class HttpMcpClient {
 
         let lastError: unknown;
         for (const attempt of deleteAttempts) {
-            try {
-                const result = await this.callToolWithArgFallback(
-                    'riotplan_evidence',
-                    {
-                        action: 'delete',
-                        planId: planPathOrId,
-                        ...attempt,
-                        confirm: true,
-                    },
-                    {
-                        action: 'delete',
-                        path: planPathOrId,
-                        ...attempt,
-                        confirm: true,
+            for (let retry = 0; retry < 3; retry += 1) {
+                try {
+                    const result = await this.callToolWithArgFallback(
+                        'riotplan_evidence',
+                        {
+                            action: 'delete',
+                            planId: planPathOrId,
+                            ...attempt,
+                            confirm: true,
+                        },
+                        {
+                            action: 'delete',
+                            path: planPathOrId,
+                            ...attempt,
+                            confirm: true,
+                        }
+                    );
+                    return this.parseToolTextResult(result);
+                } catch (error) {
+                    lastError = error;
+                    const shouldRetry = this.isTransientEvidenceDeleteError(error) && retry < 2;
+                    if (!shouldRetry) {
+                        break;
                     }
-                );
-                return this.parseToolTextResult(result);
-            } catch (error) {
-                lastError = error;
+                    await this.sleep(200 * (retry + 1));
+                }
             }
         }
 

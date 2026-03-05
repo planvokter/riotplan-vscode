@@ -432,35 +432,93 @@ export class PlanDetailPanel {
                 this._panel.webview.postMessage({ command: 'removeEvidenceResult', ok: false, cancelled: true, idx });
                 return;
             }
-            const outcomes = await Promise.allSettled(
-                resolvedFilenames.map((currentFilename) => this.mcpClient.removeEvidence(this.planPath, currentFilename))
+            this._panel.webview.postMessage({
+                command: 'evidenceRemovalPending',
+                pending: true,
+                filenames: resolvedFilenames,
+            });
+
+            const removed: string[] = [];
+            const failures: string[] = [];
+
+            await vscode.window.withProgress(
+                {
+                    location: vscode.ProgressLocation.Notification,
+                    title: itemCount === 1 ? 'Removing evidence…' : `Removing ${itemCount} evidence entries…`,
+                    cancellable: false,
+                },
+                async (progress) => {
+                    const maxParallel = Math.min(3, itemCount);
+                    let completed = 0;
+                    let nextIndex = 0;
+                    const incrementPerItem = 100 / itemCount;
+
+                    const runWorker = async (): Promise<void> => {
+                        while (nextIndex < itemCount) {
+                            const currentIndex = nextIndex;
+                            nextIndex += 1;
+                            const currentFilename = resolvedFilenames[currentIndex];
+                            try {
+                                await this.mcpClient.removeEvidence(this.planPath, currentFilename);
+                                removed.push(currentFilename);
+                            } catch (error) {
+                                failures.push(String(error));
+                            }
+                            completed += 1;
+                            progress.report({
+                                increment: incrementPerItem,
+                                message: `${completed}/${itemCount}`,
+                            });
+                        }
+                    };
+
+                    await Promise.all(
+                        Array.from({ length: maxParallel }, async () => runWorker())
+                    );
+                    if (completed < itemCount) {
+                        progress.report({ increment: 100, message: `${itemCount}/${itemCount}` });
+                    }
+                }
             );
-            const failures = outcomes.filter(
-                (outcome): outcome is PromiseRejectedResult => outcome.status === 'rejected'
-            );
+
+            if (removed.length > 0) {
+                this._panel.webview.postMessage({
+                    command: 'removeEvidenceResult',
+                    ok: true,
+                    idx,
+                    removed,
+                });
+            }
+
             if (failures.length > 0) {
-                const firstFailure = failures[0]?.reason;
-                throw new Error(
+                const firstFailure = failures[0];
+                const failureMessage =
                     failures.length === 1
-                        ? String(firstFailure)
-                        : `${failures.length} evidence removals failed; first error: ${String(firstFailure)}`
+                        ? firstFailure
+                        : `${failures.length} evidence removals failed; first error: ${firstFailure}`;
+                if (removed.length === 0) {
+                    this._panel.webview.postMessage({ command: 'removeEvidenceResult', ok: false, idx });
+                    throw new Error(failureMessage);
+                }
+                vscode.window.showWarningMessage(
+                    `Some evidence could not be removed (${failures.length}/${itemCount}). ${failureMessage}`
                 );
             }
+
             vscode.window.setStatusBarMessage(
                 itemCount === 1
                     ? 'Removed evidence item'
-                    : `Removed ${itemCount} evidence items`,
+                    : `Removed ${removed.length} evidence items`,
                 2500
             );
-            this._panel.webview.postMessage({
-                command: 'removeEvidenceResult',
-                ok: true,
-                idx,
-                removed: resolvedFilenames,
-            });
         } catch (error) {
             this._panel.webview.postMessage({ command: 'removeEvidenceResult', ok: false, idx });
             vscode.window.showErrorMessage(`Failed to remove evidence: ${error}`);
+        } finally {
+            this._panel.webview.postMessage({
+                command: 'evidenceRemovalPending',
+                pending: false,
+            });
         }
     }
 
@@ -1385,6 +1443,10 @@ body {
     background: rgba(79, 195, 247, 0.12);
     border-color: rgba(79, 195, 247, 0.28);
 }
+.evidence-row.removing {
+    opacity: 0.45;
+    pointer-events: none;
+}
 .evidence-row-icon {
     color: var(--vscode-descriptionForeground);
     font-size: 12px;
@@ -2256,6 +2318,7 @@ var evidenceContextIdx = -1;
 var evidenceSelectedIdxs = [];
 var evidenceSelectionAnchorIdx = -1;
 var evidenceContextMenuWired = false;
+var evidenceRemovalPendingByName = {};
 
 function updateEvidenceTabLabel() {
     var evidenceTab = document.querySelector('.tab-btn[data-tab="evidence"]');
@@ -2327,6 +2390,7 @@ function applyEvidenceRemoval(removedRefs) {
     evidenceContextIdx = -1;
     evidenceSelectedIdxs = [];
     evidenceSelectionAnchorIdx = -1;
+    evidenceRemovalPendingByName = {};
     hideEvidenceContextMenu();
     renderEvidenceRows();
     wireEvidenceRowContextMenu();
@@ -2336,6 +2400,30 @@ function applyEvidenceRemoval(removedRefs) {
         return;
     }
     showEvidenceDetailEmptyState();
+}
+
+function setEvidenceRemovalPending(pending, filenames) {
+    evidenceRemovalPendingByName = {};
+    if (pending && Array.isArray(filenames)) {
+        filenames.forEach(function(name) {
+            if (typeof name === 'string' && name.trim()) {
+                evidenceRemovalPendingByName[name.trim()] = true;
+            }
+        });
+    }
+    document.querySelectorAll('.evidence-row').forEach(function(row) {
+        var idxStr = row.getAttribute('data-evidence-idx');
+        var idx = idxStr ? parseInt(idxStr, 10) : -1;
+        var entry = Array.isArray(evidenceEntries) ? evidenceEntries[idx] : undefined;
+        var name = entry && typeof entry.name === 'string' ? entry.name.trim() : '';
+        var isPending = !!(name && evidenceRemovalPendingByName[name]);
+        row.classList.toggle('removing', isPending);
+    });
+    var removeBtn = document.getElementById('evidence-context-remove');
+    if (removeBtn) {
+        removeBtn.disabled = !!pending;
+        removeBtn.textContent = pending ? 'Removing…' : 'Remove Evidence';
+    }
 }
 
 function updateEvidenceSelectionStyles() {
@@ -2739,6 +2827,10 @@ window.addEventListener('message', function(event) {
         if (!msg.ok && !msg.cancelled) {
             console.error('Evidence remove failed');
         }
+    }
+
+    if (msg.command === 'evidenceRemovalPending') {
+        setEvidenceRemovalPending(!!msg.pending, msg.filenames || []);
     }
 
     if (msg.command === 'projectMetaUpdated') {
