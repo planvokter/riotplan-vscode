@@ -858,19 +858,76 @@ export class PlanDetailPanel {
             }).join('');
 
         // Tab labels
+        const shapingApproachCount = (typeof shapingContent === 'string'
+            ? (shapingContent.match(/^\s*(?:#+\s*)?APPROACH:\s+/gim) || []).length
+            : 0);
+        const shapingTab = `Shaping${shapingApproachCount > 0 ? ` (${shapingApproachCount})` : ''}`;
         const stepTab = `Steps${steps.length > 0 ? ` (${progress.completed}/${progress.total})` : ''}`;
         const evidTab = `Evidence${evidenceFiles.length > 0 ? ` (${evidenceFiles.length})` : ''}`;
         const histTab = `History${historyEvents.length > 0 ? ` (${historyEvents.length})` : ''}`;
 
         // Constraints & questions for overview tab
+        const shapingApproachNames = (() => {
+            if (typeof shapingContent !== 'string' || !shapingContent.trim()) {
+                return [] as string[];
+            }
+            const matches = Array.from(shapingContent.matchAll(/^\s*(?:#+\s*)?APPROACH:\s*(.+?)\s*$/gim));
+            const normalizeName = (name: string) => name.trim().replace(/\s+/g, ' ').toLowerCase();
+            const placeholders = new Set(['name', 'approach', 'approach name', '[name]', '[approach]']);
+            const names = matches
+                .map((match) => (match[1] || '').trim())
+                .filter((name) => Boolean(name))
+                .filter((name) => !placeholders.has(normalizeName(name)))
+                .filter((name) => !/\[(name|title|approach)\]/i.test(name));
+            return Array.from(new Set(names));
+        })();
+        const shapingSummaryList = shapingApproachNames.length > 0
+            ? shapingApproachNames.slice(0, 4).map((name) => `<li>${this._esc(name)}</li>`).join('')
+            : '';
+        const shapingSummaryMore = shapingApproachNames.length > 4
+            ? `<p class="empty-hint">+${shapingApproachNames.length - 4} more proposals in the Shaping tab</p>`
+            : '';
+        const shapingOverviewBlock = (selectedApproach || shapingApproachNames.length > 0)
+            ? `<div class="overview-section">
+      <h3 class="overview-section-title">Shaping Snapshot</h3>
+      ${selectedApproach ? `<p><strong>Selected approach:</strong> ${this._esc(selectedApproach)}</p>` : '<p class="empty-hint">No selected approach yet</p>'}
+      ${shapingApproachNames.length > 0 ? `<ul class="bullet-list">${shapingSummaryList}</ul>${shapingSummaryMore}` : '<p class="empty-hint">No valid shaping proposals detected yet</p>'}
+    </div>`
+            : '';
+        const nextActions = (() => {
+            const tips: string[] = [];
+            if (stage === 'idea') {
+                tips.push('Collect more evidence and constraints before selecting a direction.');
+            }
+            if (stage === 'shaping' && shapingApproachNames.length === 0) {
+                tips.push('Add concrete shaping proposals (non-template) so tradeoffs are visible.');
+            }
+            if (stage === 'shaping' && !selectedApproach) {
+                tips.push('Select a preferred approach to move cleanly into build planning.');
+            }
+            if (progress.total > 0 && progress.completed < progress.total) {
+                tips.push(`Continue execution: ${progress.total - progress.completed} step(s) remaining.`);
+            }
+            if (progress.total === 0 && (stage === 'built' || stage === 'executing')) {
+                tips.push('No steps are loaded yet; rebuild or refresh the plan artifacts.');
+            }
+            if (questions.length > 0) {
+                tips.push(`Resolve ${questions.length} open question${questions.length === 1 ? '' : 's'} to reduce risk.`);
+            }
+            if (tips.length === 0) {
+                tips.push('Plan looks healthy - keep progress updated as work lands.');
+            }
+            return tips;
+        })();
+        const nextActionsBlock = `<div class="overview-section">
+      <h3 class="overview-section-title">Suggested Next Actions</h3>
+      <ul class="bullet-list">${nextActions.map((tip) => `<li>${this._esc(tip)}</li>`).join('')}</ul>
+    </div>`;
         const constraintsBlock = constraints.length > 0
             ? `<div class="meta-section"><h3 class="meta-section-title">⚑ Constraints</h3><ul class="bullet-list">${constraints.map(c => `<li>${this._esc(c)}</li>`).join('')}</ul></div>`
             : '';
         const questionsBlock = questions.length > 0
             ? `<div class="meta-section"><h3 class="meta-section-title">? Open Questions</h3><ul class="bullet-list">${questions.map(q => `<li>${this._esc(q)}</li>`).join('')}</ul></div>`
-            : '';
-        const shapingBlock = shapingContent
-            ? `<div class="meta-section">${selectedApproach ? `<h3 class="meta-section-title">✦ Selected Approach: ${this._esc(selectedApproach)}</h3>` : `<h3 class="meta-section-title">✦ Shaping</h3>`}<div class="shaping-content md-content" id="shaping-md"></div></div>`
             : '';
 
         // Embed content as JSON for the webview JS to render.
@@ -878,6 +935,7 @@ export class PlanDetailPanel {
         const escapeScript = (s: string) => s.replace(/<\//g, '\\u003c/');
         const ideaJson = escapeScript(JSON.stringify(ideaContent));
         const shapingJson = escapeScript(JSON.stringify(shapingContent));
+        const selectedApproachJson = escapeScript(JSON.stringify(selectedApproach));
         const summaryJson = escapeScript(JSON.stringify(summaryContent));
         const executionPlanJson = escapeScript(JSON.stringify(executionPlanContent));
         const evidenceFilesJson = escapeScript(JSON.stringify(evidenceFiles));
@@ -1415,6 +1473,61 @@ body {
     background: var(--vscode-sideBar-background, rgba(255,255,255,0.02));
     max-height: calc(100vh - 330px);
     overflow: auto;
+    scrollbar-width: thin;
+    scrollbar-color: var(--vscode-scrollbarSlider-background, rgba(121,121,121,0.45)) transparent;
+}
+.evidence-list::-webkit-scrollbar {
+    width: 10px;
+}
+.evidence-list::-webkit-scrollbar-track {
+    background: transparent;
+}
+.evidence-list::-webkit-scrollbar-thumb {
+    background: var(--vscode-scrollbarSlider-background, rgba(121,121,121,0.45));
+    border-radius: 999px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+}
+.evidence-list-wrap {
+    position: relative;
+    min-height: 0;
+}
+.evidence-list-fade {
+    position: absolute;
+    left: 1px;
+    right: 1px;
+    bottom: 1px;
+    height: 26px;
+    pointer-events: none;
+    border-radius: 0 0 6px 6px;
+    opacity: 0;
+    transition: opacity 0.15s ease;
+    background: linear-gradient(to bottom, rgba(0, 0, 0, 0), var(--vscode-sideBar-background, rgba(20,20,20,0.95)) 85%);
+}
+.evidence-list-fade.visible {
+    opacity: 1;
+}
+.evidence-scroll-hint {
+    display: none;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    margin-top: 8px;
+    font-size: 11px;
+    color: var(--vscode-descriptionForeground);
+    opacity: 0.9;
+    text-align: center;
+}
+.evidence-scroll-hint.visible {
+    display: flex;
+}
+.evidence-scroll-hint-arrow {
+    opacity: 0.75;
+    animation: evidenceScrollBounce 1.2s ease-in-out infinite;
+}
+@keyframes evidenceScrollBounce {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(2px); }
 }
 .evidence-row {
     display: flex;
@@ -1738,10 +1851,108 @@ body {
 }
 
 /* ── Shaping tab ─────────────────────────────────────────────── */
-.shaping-container {
+.shaping-layout {
+    display: grid;
+    grid-template-columns: minmax(240px, 340px) minmax(0, 1fr);
+    gap: 14px;
+}
+.shaping-list-wrap {
+    min-height: 0;
+}
+.shaping-list {
     display: flex;
     flex-direction: column;
-    gap: 16px;
+    gap: 6px;
+    border: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.1));
+    border-radius: 6px;
+    background: var(--vscode-sideBar-background, rgba(255,255,255,0.02));
+    padding: 6px;
+    max-height: calc(100vh - 330px);
+    overflow: auto;
+}
+.shaping-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    width: 100%;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+    text-align: left;
+    padding: 8px 9px;
+    font-family: inherit;
+    font-size: inherit;
+}
+.shaping-row:hover {
+    background: var(--vscode-list-hoverBackground, rgba(255,255,255,0.04));
+    border-color: var(--vscode-panel-border, rgba(255,255,255,0.08));
+}
+.shaping-row.active {
+    background: rgba(79, 195, 247, 0.1);
+    border-color: rgba(79, 195, 247, 0.25);
+}
+.shaping-row-icon {
+    color: var(--vscode-descriptionForeground);
+    font-size: 12px;
+    margin-top: 1px;
+    flex-shrink: 0;
+}
+.shaping-row-body {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+.shaping-row-name {
+    font-size: 12px;
+    color: var(--vscode-editor-foreground);
+    font-weight: 500;
+    word-break: break-word;
+}
+.shaping-row-preview {
+    font-size: 11px;
+    color: var(--vscode-descriptionForeground);
+    opacity: 0.8;
+    line-height: 1.35;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+.shaping-row-meta {
+    font-size: 10px;
+    color: var(--vscode-descriptionForeground);
+    opacity: 0.7;
+    line-height: 1.3;
+}
+.shaping-detail {
+    border: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.1));
+    border-radius: 6px;
+    background: var(--vscode-sideBar-background, rgba(255,255,255,0.02));
+    padding: 14px;
+    overflow: auto;
+    max-height: calc(100vh - 330px);
+}
+.shaping-detail-header {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    margin-bottom: 10px;
+}
+.shaping-detail-title {
+    margin: 0;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--vscode-editor-foreground);
+    line-height: 1.35;
+}
+.shaping-detail-meta {
+    font-size: 11px;
+    color: var(--vscode-descriptionForeground);
+    opacity: 0.75;
 }
 .selected-approach-banner {
     padding: 12px 16px;
@@ -1757,6 +1968,19 @@ body {
     letter-spacing: 0.05em;
     color: var(--vscode-descriptionForeground);
     margin-right: 6px;
+}
+@media (max-width: 1100px) {
+    .shaping-layout {
+        grid-template-columns: 1fr;
+        gap: 10px;
+    }
+    .shaping-list {
+        max-height: 220px;
+    }
+    .shaping-detail {
+        max-height: none;
+        min-height: 240px;
+    }
 }
 
 /* ── Empty states ────────────────────────────────────────────── */
@@ -1812,7 +2036,7 @@ body {
   <button class="tab-btn active" data-tab="overview">Overview</button>
   <button class="tab-btn" data-tab="idea">Idea</button>
   <button class="tab-btn" data-tab="evidence">${this._esc(evidTab)}</button>
-  <button class="tab-btn" data-tab="shaping">Shaping</button>
+  <button class="tab-btn" data-tab="shaping">${this._esc(shapingTab)}</button>
   <button class="tab-btn" data-tab="steps">${this._esc(stepTab)}</button>
   <button class="tab-btn" data-tab="execution">Execution Plan</button>
   <button class="tab-btn" data-tab="history">${this._esc(histTab)}</button>
@@ -1827,7 +2051,8 @@ body {
     </div>
     ${constraintsBlock}
     ${questionsBlock}
-    ${shapingBlock}
+    ${shapingOverviewBlock}
+    ${nextActionsBlock}
     <div class="overview-section">
       <h3 class="overview-section-title">Quick Stats</h3>
       <div class="quick-stats">
@@ -1835,6 +2060,10 @@ body {
         <div class="stat-item"><span class="stat-label">Progress</span><span class="stat-value">${progress.completed}/${progress.total} steps (${Math.round(pct)}%)</span></div>
         ${steps.length > 0 ? `<div class="stat-item"><span class="stat-label">Current Step</span><span class="stat-value">${status?.currentStep || 'N/A'}</span></div>` : ''}
         ${selectedApproach ? `<div class="stat-item"><span class="stat-label">Approach</span><span class="stat-value">${this._esc(selectedApproach)}</span></div>` : ''}
+        <div class="stat-item"><span class="stat-label">Shaping Proposals</span><span class="stat-value">${shapingApproachNames.length}</span></div>
+        <div class="stat-item"><span class="stat-label">Evidence</span><span class="stat-value">${evidenceFiles.length}</span></div>
+        <div class="stat-item"><span class="stat-label">Open Questions</span><span class="stat-value">${questions.length}</span></div>
+        <div class="stat-item"><span class="stat-label">Constraints</span><span class="stat-value">${constraints.length}</span></div>
       </div>
     </div>
   </div>
@@ -1893,7 +2122,11 @@ body {
   <!-- Evidence list + detail -->
   ${evidenceFiles.length === 0 ? evidenceHtml : `
   <div class="evidence-layout">
-    <div class="evidence-list">${evidenceHtml}</div>
+    <div class="evidence-list-wrap">
+      <div class="evidence-list" id="evidence-list">${evidenceHtml}</div>
+      <div class="evidence-list-fade" id="evidence-list-fade" aria-hidden="true"></div>
+      <div class="evidence-scroll-hint" id="evidence-scroll-hint" aria-live="polite"></div>
+    </div>
     <div class="evidence-detail">
       <div id="evidence-detail-empty" class="empty-state" style="padding:28px 16px">
         <span class="empty-icon">◫</span>
@@ -1919,9 +2152,26 @@ body {
 <!-- ── Shaping tab ─────────────────────────────────── -->
 <div id="pane-shaping" class="pane">
   ${shapingContent
-        ? `<div class="shaping-container">
-          ${selectedApproach ? `<div class="selected-approach-banner"><span class="approach-label">Selected Approach:</span> <strong>${this._esc(selectedApproach)}</strong></div>` : ''}
-          <div class="md-content" id="shaping-full-md"></div>
+        ? `<div class="shaping-layout">
+          <div class="shaping-list-wrap">
+            <div class="shaping-list" id="shaping-list"></div>
+          </div>
+          <div class="shaping-detail">
+            <div id="shaping-detail-empty" class="empty-state" style="padding:28px 16px">
+              <span class="empty-icon">◇</span>
+              <p>Select a shaping proposal to view details</p>
+            </div>
+            <div id="shaping-detail-content" style="display:none">
+              <div class="shaping-detail-header">
+                <h3 class="shaping-detail-title" id="shaping-detail-title"></h3>
+                <span class="shaping-detail-meta" id="shaping-detail-meta"></span>
+              </div>
+              <div class="selected-approach-banner" id="selected-approach-banner" style="display:none">
+                <span class="approach-label">Selected Approach:</span> <strong id="selected-approach-banner-name"></strong>
+              </div>
+              <div class="md-content" id="shaping-detail-md"></div>
+            </div>
+          </div>
         </div>`
         : `<div class="empty-state"><span class="empty-icon">◇</span><p>No shaping document found</p><p class="empty-hint">Use riotplan_shaping(action: "start") to begin comparing approaches</p></div>`
 }
@@ -2141,6 +2391,7 @@ function escHtml(s) {
 // ── Render initial markdown content ─────────────────────────
 var ideaMd = ${ideaJson};
 var shapingMd = ${shapingJson};
+var selectedApproachName = ${selectedApproachJson};
 var summaryMd = ${summaryJson};
 var executionPlanMd = ${executionPlanJson};
 var evidenceEntries = ${evidenceFilesJson};
@@ -2193,8 +2444,8 @@ function updateProjectMeta(project, projectPath, repoUrl) {
 try {
     var ideaEl = document.getElementById('idea-md');
     if (ideaEl && ideaMd) { ideaEl.innerHTML = renderMarkdown(ideaMd); }
-    var shapingEl = document.getElementById('shaping-full-md');
-    if (shapingEl && shapingMd) { shapingEl.innerHTML = renderMarkdown(shapingMd); }
+    var shapingOverviewEl = document.getElementById('shaping-md');
+    if (shapingOverviewEl && shapingMd) { shapingOverviewEl.innerHTML = renderMarkdown(shapingMd); }
     var summaryEl = document.getElementById('summary-md');
     if (summaryEl && summaryMd) { summaryEl.innerHTML = renderMarkdown(summaryMd); }
     var executionPlanEl = document.getElementById('execution-plan-md');
@@ -2318,6 +2569,7 @@ var evidenceContextIdx = -1;
 var evidenceSelectedIdxs = [];
 var evidenceSelectionAnchorIdx = -1;
 var evidenceContextMenuWired = false;
+var evidenceScrollHintWired = false;
 var evidenceRemovalPendingByName = {};
 
 function updateEvidenceTabLabel() {
@@ -2332,6 +2584,7 @@ function renderEvidenceRows() {
     if (!list) { return; }
     if (!Array.isArray(evidenceEntries) || evidenceEntries.length === 0) {
         list.innerHTML = '<div class="empty-state"><span class="empty-icon">◫</span><p>No evidence files attached</p></div>';
+        updateEvidenceScrollAffordance();
         return;
     }
     list.innerHTML = evidenceEntries.map(function(entry, idx) {
@@ -2353,6 +2606,42 @@ function renderEvidenceRows() {
             '<button class="evidence-row-action" id="evidence-copy-url-' + idx + '" onclick="copyEvidenceUrl(' + idx + ', event)" title="Copy Evidence URL">⧉</button>' +
         '</div>';
     }).join('');
+    updateEvidenceScrollAffordance();
+}
+
+function updateEvidenceScrollAffordance() {
+    var list = document.getElementById('evidence-list') || document.querySelector('#pane-evidence .evidence-list');
+    var fade = document.getElementById('evidence-list-fade');
+    var hint = document.getElementById('evidence-scroll-hint');
+    if (!list || !fade || !hint) { return; }
+
+    var total = Array.isArray(evidenceEntries) ? evidenceEntries.length : 0;
+    var hasOverflow = list.scrollHeight > (list.clientHeight + 2);
+    var canScrollMore = hasOverflow && ((list.scrollTop + list.clientHeight) < (list.scrollHeight - 2));
+
+    fade.classList.toggle('visible', canScrollMore);
+    hint.classList.toggle('visible', hasOverflow);
+    if (!hasOverflow) {
+        hint.textContent = '';
+        return;
+    }
+
+    hint.innerHTML = canScrollMore
+        ? ('Scroll to view all ' + total + ' evidence entries <span class="evidence-scroll-hint-arrow">▼</span>')
+        : ('Showing all ' + total + ' evidence entries');
+}
+
+function wireEvidenceListScrollAffordance() {
+    var list = document.getElementById('evidence-list') || document.querySelector('#pane-evidence .evidence-list');
+    if (!list) { return; }
+
+    if (!evidenceScrollHintWired) {
+        list.addEventListener('scroll', updateEvidenceScrollAffordance);
+        window.addEventListener('resize', updateEvidenceScrollAffordance);
+        evidenceScrollHintWired = true;
+    }
+
+    setTimeout(updateEvidenceScrollAffordance, 0);
 }
 
 function showEvidenceDetailEmptyState() {
@@ -2764,6 +3053,191 @@ function flashEvidenceCopyButton(idx) {
     }, 1100);
 }
 
+// ── Shaping list/detail ────────────────────────────────────────
+var shapingApproaches = [];
+var selectedShapingIdx = -1;
+
+function updateShapingTabLabel() {
+    var shapingTab = document.querySelector('.tab-btn[data-tab="shaping"]');
+    if (!shapingTab) { return; }
+    var count = Array.isArray(shapingApproaches) ? shapingApproaches.length : 0;
+    shapingTab.textContent = count > 0 ? ('Shaping (' + count + ')') : 'Shaping';
+}
+
+function normalizeApproachName(name) {
+    if (typeof name !== 'string') { return ''; }
+    return name.trim().replace(/\\s+/g, ' ').toLowerCase();
+}
+
+function getShapingPreview(markdown) {
+    if (typeof markdown !== 'string') { return ''; }
+    var lines = markdown
+        .split('\\n')
+        .map(function(line) { return line.trim(); })
+        .filter(function(line) { return Boolean(line); });
+    var ignoredPrefixes = ['description:', 'tradeoffs:', 'assumptions:', 'feedback:', 'decision:'];
+    for (var i = 0; i < lines.length; i += 1) {
+        var line = lines[i];
+        if (/^#+\\s+/.test(line)) { continue; }
+        if (/^[-*]\\s+/.test(line)) { line = line.replace(/^[-*]\\s+/, ''); }
+        var lower = line.toLowerCase();
+        if (ignoredPrefixes.some(function(prefix) { return lower.indexOf(prefix) === 0; })) {
+            continue;
+        }
+        if (line.length >= 8) {
+            return line;
+        }
+    }
+    return lines[0] || '';
+}
+
+function looksLikePlaceholderApproach(name, body) {
+    var normalizedName = normalizeApproachName(name);
+    var normalizedBody = (typeof body === 'string' ? body : '').toLowerCase();
+    if (!normalizedName && !normalizedBody.trim()) {
+        return true;
+    }
+    if (/\\[(name|title|approach)\\]/i.test(name || '')) {
+        return true;
+    }
+    if (normalizedName === 'name' || normalizedName === 'approach' || normalizedName === 'approach name') {
+        return true;
+    }
+    var placeholderSignals = [
+        'put your proposal here',
+        'add approaches using riotplan_shaping',
+        'what problem are we solving',
+        'what are we trying to achieve',
+    ];
+    return placeholderSignals.some(function(signal) {
+        return normalizedBody.indexOf(signal) >= 0;
+    });
+}
+
+function parseShapingApproaches(md) {
+    if (typeof md !== 'string' || !md.trim()) { return []; }
+    var lines = md.split('\\n');
+    var approaches = [];
+    var current = null;
+
+    lines.forEach(function(line) {
+        var match = line.match(/^\\s*(?:#+\\s*)?APPROACH:\\s*(.+?)\\s*$/i);
+        if (match) {
+            if (current) {
+                current.content = current.lines.join('\\n').trim();
+                current.preview = getShapingPreview(current.content);
+                approaches.push(current);
+            }
+            current = {
+                name: match[1].trim(),
+                lines: [],
+                content: '',
+                preview: '',
+            };
+            return;
+        }
+        if (current) {
+            current.lines.push(line);
+        }
+    });
+
+    if (current) {
+        current.content = current.lines.join('\\n').trim();
+        current.preview = getShapingPreview(current.content);
+        approaches.push(current);
+    }
+
+    var filtered = approaches.filter(function(approach) {
+        return !looksLikePlaceholderApproach(approach.name, approach.content);
+    });
+
+    if (filtered.length > 0) {
+        return filtered;
+    }
+
+    return [{
+        name: selectedApproachName || 'Shaping Document',
+        content: md.trim(),
+        preview: getShapingPreview(md),
+    }];
+}
+
+function renderShapingRows() {
+    var list = document.getElementById('shaping-list');
+    if (!list) { return; }
+    if (!Array.isArray(shapingApproaches) || shapingApproaches.length === 0) {
+        list.innerHTML = '<div class="empty-state"><span class="empty-icon">◇</span><p>No shaping proposals found</p></div>';
+        updateShapingTabLabel();
+        return;
+    }
+    list.innerHTML = shapingApproaches.map(function(approach, idx) {
+        var isSelected = normalizeApproachName(approach.name) === normalizeApproachName(selectedApproachName);
+        return '<div class="shaping-row" role="button" tabindex="0" data-shaping-idx="' + idx + '" onclick="selectShapingApproach(' + idx + ', event)">' +
+            '<span class="shaping-row-icon">◇</span>' +
+            '<span class="shaping-row-body">' +
+                '<span class="shaping-row-name">' + escHtml(approach.name || ('Approach ' + (idx + 1))) + '</span>' +
+                (approach.preview ? ('<span class="shaping-row-preview">' + escHtml(approach.preview) + '</span>') : '') +
+                '<span class="shaping-row-meta">' + (isSelected ? 'Selected approach' : 'Alternative approach') + '</span>' +
+            '</span>' +
+        '</div>';
+    }).join('');
+
+    list.querySelectorAll('.shaping-row').forEach(function(row) {
+        row.addEventListener('keydown', function(event) {
+            if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                var idxStr = row.getAttribute('data-shaping-idx');
+                var idx = idxStr ? parseInt(idxStr, 10) : -1;
+                if (idx >= 0) { selectShapingApproach(idx, event); }
+            }
+        });
+    });
+    updateShapingTabLabel();
+}
+
+function selectShapingApproach(idx, ev) {
+    if (ev) { ev.stopPropagation(); }
+    if (!Array.isArray(shapingApproaches) || !shapingApproaches[idx]) { return; }
+    selectedShapingIdx = idx;
+    document.querySelectorAll('.shaping-row').forEach(function(row) {
+        var idxStr = row.getAttribute('data-shaping-idx');
+        var rowIdx = idxStr ? parseInt(idxStr, 10) : -1;
+        row.classList.toggle('active', rowIdx === idx);
+    });
+
+    var approach = shapingApproaches[idx];
+    var detailEmpty = document.getElementById('shaping-detail-empty');
+    var detailContent = document.getElementById('shaping-detail-content');
+    var detailTitle = document.getElementById('shaping-detail-title');
+    var detailMeta = document.getElementById('shaping-detail-meta');
+    var detailBody = document.getElementById('shaping-detail-md');
+    var selectedBanner = document.getElementById('selected-approach-banner');
+    var selectedBannerName = document.getElementById('selected-approach-banner-name');
+    var isSelectedApproach = normalizeApproachName(approach.name) === normalizeApproachName(selectedApproachName);
+
+    if (detailEmpty) { detailEmpty.style.display = 'none'; }
+    if (detailContent) { detailContent.style.display = 'block'; }
+    if (detailTitle) { detailTitle.textContent = approach.name || ('Approach ' + (idx + 1)); }
+    if (detailMeta) { detailMeta.textContent = isSelectedApproach ? 'Selected approach' : 'Alternative approach'; }
+    if (detailBody) { detailBody.innerHTML = renderMarkdown(approach.content || shapingMd || ''); }
+    if (selectedBanner) { selectedBanner.style.display = isSelectedApproach ? 'block' : 'none'; }
+    if (selectedBannerName) { selectedBannerName.textContent = selectedApproachName || approach.name || ''; }
+}
+
+function initShapingView() {
+    var list = document.getElementById('shaping-list');
+    if (!list) { return; }
+    shapingApproaches = parseShapingApproaches(shapingMd);
+    renderShapingRows();
+    if (!Array.isArray(shapingApproaches) || shapingApproaches.length === 0) {
+        return;
+    }
+    var preferredIdx = shapingApproaches.findIndex(function(approach) {
+        return normalizeApproachName(approach.name) === normalizeApproachName(selectedApproachName);
+    });
+    selectShapingApproach(preferredIdx >= 0 ? preferredIdx : 0);
+}
+
 // ── Messages from extension ──────────────────────────────────
 window.addEventListener('message', function(event) {
     var msg = event.data;
@@ -2848,9 +3322,11 @@ window.addEventListener('message', function(event) {
 });
 
 wireEvidenceRowContextMenu();
+wireEvidenceListScrollAffordance();
 if (Array.isArray(evidenceEntries) && evidenceEntries.length > 0) {
     selectEvidence(0);
 }
+initShapingView();
 </script>
 </body>
 </html>`;
