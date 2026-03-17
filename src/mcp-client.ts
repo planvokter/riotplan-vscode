@@ -372,6 +372,41 @@ export class HttpMcpClient {
         });
     }
 
+    async deletePlan(planPathOrId: string): Promise<any> {
+        const trimmed = planPathOrId.trim();
+        if (!trimmed) {
+            throw new Error('Plan identifier is required to delete a plan.');
+        }
+
+        const attempts: Array<Record<string, unknown>> = [
+            { action: 'delete', planId: trimmed },
+            { action: 'delete', path: trimmed },
+            { action: 'remove', planId: trimmed },
+            { action: 'remove', path: trimmed },
+        ];
+
+        let lastError: unknown;
+        for (const args of attempts) {
+            try {
+                const result = await this.sendRequest('tools/call', {
+                    name: 'riotplan_plan',
+                    arguments: args,
+                });
+                const toolErrorText = getToolErrorText(result);
+                if (toolErrorText) {
+                    throw new Error(toolErrorText);
+                }
+                return result;
+            } catch (error) {
+                lastError = error;
+            }
+        }
+
+        throw lastError instanceof Error
+            ? lastError
+            : new Error(`Failed to delete plan: ${trimmed}`);
+    }
+
     async createPlan(args: {
         code: string;
         description: string;

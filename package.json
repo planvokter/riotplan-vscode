@@ -11,7 +11,15 @@
     "Other"
   ],
   "activationEvents": [
-    "onStartupFinished"
+    "onStartupFinished",
+    "onCommand:riotplan.transferPlan",
+    "onCommand:riotplan.openServerManager",
+    "onCommand:riotplan.addServerConnection",
+    "onCommand:riotplan.switchServerConnection",
+    "onCommand:riotplan.showServerConnectionDetails",
+    "onCommand:riotplan.removeServerConnection",
+    "onCommand:riotplan.configureApiKey",
+    "onCommand:riotplan.clearApiKey"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -21,17 +29,62 @@
         "riotplan.serverUrl": {
           "type": "string",
           "default": "http://127.0.0.1:3002",
-          "description": "RiotPlan HTTP MCP server URL"
+          "description": "Legacy single-server fallback URL. Prefer riotplan.serverProfiles.",
+          "markdownDescription": "Active RiotPlan HTTP MCP server URL (legacy/single-server fallback). For multi-server setups, use `riotplan.serverProfiles` and [Manage Servers and Tokens](command:riotplan.openServerManager)."
         },
-        "riotplan.apiKey": {
+        "riotplan.serverProfiles": {
+          "type": "array",
+          "default": [],
+          "description": "Configured RiotPlan server profiles.",
+          "markdownDescription": "List of RiotPlan server profiles. Use Settings UI to add items with the `+` button, or use [Add Server Connection](command:riotplan.addServerConnection). Configure per-server API tokens in [Manage Servers and Tokens](command:riotplan.openServerManager).",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "name",
+              "url",
+              "enabled"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "Stable profile identifier"
+              },
+              "name": {
+                "type": "string",
+                "description": "Display name for this server profile"
+              },
+              "url": {
+                "type": "string",
+                "description": "RiotPlan HTTP MCP server URL"
+              },
+              "enabled": {
+                "type": "boolean",
+                "description": "Whether this profile is enabled for startup connections"
+              },
+              "proxyBypass": {
+                "type": "boolean",
+                "description": "Bypass proxy for this server profile"
+              },
+              "createdAt": {
+                "type": "string"
+              },
+              "updatedAt": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "riotplan.activeServerId": {
           "type": "string",
           "default": "",
-          "description": "Optional API key sent as Authorization: Bearer and X-API-Key headers for secured RiotPlan HTTP servers."
+          "description": "Active RiotPlan server profile id.",
+          "markdownDescription": "ID of the active server profile in `riotplan.serverProfiles`. You can change this via [Manage Servers and Tokens](command:riotplan.openServerManager)."
         },
         "riotplan.proxyBypass": {
           "type": "boolean",
           "default": false,
-          "description": "Bypass system/corporate proxy when connecting to the RiotPlan server. Enable this if your RiotPlan server is accessible directly but blocked by a corporate proxy."
+          "description": "Global fallback proxy bypass. Prefer per-profile proxyBypass in riotplan.serverProfiles."
         }
       }
     },
@@ -97,6 +150,11 @@
         "icon": "$(cloud-download)"
       },
       {
+        "command": "riotplan.transferPlan",
+        "title": "Transfer Plan to Server",
+        "icon": "$(arrow-swap)"
+      },
+      {
         "command": "riotplan.openPlan",
         "title": "Open Plan"
       },
@@ -108,7 +166,49 @@
       {
         "command": "riotplan.configureServerUrl",
         "title": "Configure Server URL",
-        "icon": "$(gear)"
+        "icon": "$(gear)",
+        "category": "RiotPlan"
+      },
+      {
+        "command": "riotplan.openServerManager",
+        "title": "Manage Servers and Tokens",
+        "icon": "$(settings-gear)",
+        "category": "RiotPlan"
+      },
+      {
+        "command": "riotplan.addServerConnection",
+        "title": "Add Server Connection",
+        "icon": "$(add)",
+        "category": "RiotPlan"
+      },
+      {
+        "command": "riotplan.switchServerConnection",
+        "title": "Switch Server Connection",
+        "icon": "$(server-process)",
+        "category": "RiotPlan"
+      },
+      {
+        "command": "riotplan.showServerConnectionDetails",
+        "title": "Show Server Connection Details",
+        "category": "RiotPlan"
+      },
+      {
+        "command": "riotplan.removeServerConnection",
+        "title": "Remove Server Connection",
+        "icon": "$(trash)",
+        "category": "RiotPlan"
+      },
+      {
+        "command": "riotplan.configureApiKey",
+        "title": "Configure API Token",
+        "icon": "$(key)",
+        "category": "RiotPlan"
+      },
+      {
+        "command": "riotplan.clearApiKey",
+        "title": "Clear API Token",
+        "icon": "$(trash)",
+        "category": "RiotPlan"
       },
       {
         "command": "riotplan.reconnect",
@@ -184,6 +284,21 @@
           "group": "navigation"
         },
         {
+          "command": "riotplan.openServerManager",
+          "when": "view == riotplan-connection",
+          "group": "navigation"
+        },
+        {
+          "command": "riotplan.addServerConnection",
+          "when": "view == riotplan-connection",
+          "group": "navigation"
+        },
+        {
+          "command": "riotplan.switchServerConnection",
+          "when": "view == riotplan-connection",
+          "group": "navigation"
+        },
+        {
           "command": "riotplan.reconnect",
           "when": "view == riotplan-connection",
           "group": "navigation"
@@ -214,6 +329,11 @@
           "command": "riotplan.downloadPlan",
           "when": "view == riotplan-plans && viewItem == plan",
           "group": "navigation@5"
+        },
+        {
+          "command": "riotplan.transferPlan",
+          "when": "view == riotplan-plans && viewItem == plan",
+          "group": "navigation@6"
         },
         {
           "command": "riotplan.openProjectEntity",

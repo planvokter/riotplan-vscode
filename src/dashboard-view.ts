@@ -43,7 +43,7 @@ export class DashboardViewProvider {
     public static readonly viewType = 'riotplan.dashboard';
 
     private _panel: vscode.WebviewPanel | null = null;
-    private _mcpClient: HttpMcpClient | null = null;
+    private _mcpClient: Pick<HttpMcpClient, 'listPlans'> | null = null;
     private _unsubscribeNotification?: () => void;
     private _watchdogTimer?: ReturnType<typeof setInterval>;
     private _debounceTimer?: ReturnType<typeof setTimeout>;
@@ -54,19 +54,21 @@ export class DashboardViewProvider {
 
     constructor(private readonly _extensionUri: vscode.Uri) {}
 
-    setClient(client: HttpMcpClient): void {
+    setClient(client: HttpMcpClient | Pick<HttpMcpClient, 'listPlans'>): void {
         this._unregisterHandlers();
         this._mcpClient = client;
-
-        this._unsubscribeNotification = client.onNotification(
-            'notifications/resource_changed',
-            () => {
-                if (this._panel?.visible) {
-                    this._scheduleDebouncedRefresh();
-                    this._startWatchdog();
+        const notificationCapableClient = client as HttpMcpClient;
+        if (typeof notificationCapableClient.onNotification === 'function') {
+            this._unsubscribeNotification = notificationCapableClient.onNotification(
+                'notifications/resource_changed',
+                () => {
+                    if (this._panel?.visible) {
+                        this._scheduleDebouncedRefresh();
+                        this._startWatchdog();
+                    }
                 }
-            }
-        );
+            );
+        }
     }
 
     async show(): Promise<void> {

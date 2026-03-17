@@ -507,6 +507,26 @@ describe('PlanItem', () => {
         expect((shaping.iconPath as any)?.id).toBe('graph');
         expect((cancelled.iconPath as any)?.id).toBe('error');
     });
+
+    it('includes server attribution in description and tooltip', () => {
+        const item = new PlanItem(
+            'Remote Plan',
+            0,
+            'active',
+            undefined,
+            '/tmp/remote.plan',
+            'uuid-remote',
+            'plan-remote',
+            'idea',
+            undefined,
+            { id: 'project-remote' },
+            'Remote Server'
+        );
+
+        expect(item.description).toContain('Remote Server');
+        expect(item.description).toContain('project-remote');
+        expect(String(item.tooltip)).toContain('Remote Server');
+    });
 });
 
 describe('PlansTreeProvider private branches', () => {
