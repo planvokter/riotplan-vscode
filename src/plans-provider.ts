@@ -24,14 +24,16 @@ export class PlanItem extends vscode.TreeItem {
         public readonly stage?: string,
         public readonly progress?: { completed: number; total: number; percentage: number },
         public readonly project?: any,
+        public readonly serverName?: string,
         public readonly itemCount?: number
     ) {
         super(label, collapsibleState);
 
         if (path || uuid || planId) {
-            this.tooltip = label;
+            this.tooltip = serverName ? `${label} (${serverName})` : label;
             const projectLabel = project?.name || project?.id || 'Unassigned';
-            this.description = projectLabel;
+            const serverPrefix = serverName ? `${serverName} · ` : '';
+            this.description = `${serverPrefix}${projectLabel}`;
             this.iconPath = stageThemeIcon(stage);
             this.contextValue = 'plan';
             this.command = {
@@ -41,7 +43,7 @@ export class PlanItem extends vscode.TreeItem {
             };
 
             if (progress) {
-                this.description = `${progress.percentage}% · ${projectLabel}`;
+                this.description = `${serverPrefix}${progress.percentage}% · ${projectLabel}`;
             }
         } else if (category && dayKey) {
             this.contextValue = 'plan-day-group';
@@ -145,6 +147,7 @@ export class PlansTreeProvider implements vscode.TreeDataProvider<PlanItem>, vsc
                         undefined,
                         undefined,
                         undefined,
+                        undefined,
                         entry.count
                     )
             );
@@ -181,6 +184,7 @@ export class PlansTreeProvider implements vscode.TreeDataProvider<PlanItem>, vsc
                         index === 0 ? vscode.TreeItemCollapsibleState.Expanded : vscode.TreeItemCollapsibleState.Collapsed,
                         category,
                         group.dayKey,
+                        undefined,
                         undefined,
                         undefined,
                         undefined,
@@ -355,7 +359,8 @@ export class PlansTreeProvider implements vscode.TreeDataProvider<PlanItem>, vsc
             plan.planId || plan.id,
             plan.stage,
             plan.progress,
-            plan.project
+            plan.project,
+            plan.serverName
         );
     }
 

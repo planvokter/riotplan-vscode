@@ -1,18 +1,36 @@
-.vscode/**
-.vscode-test/**
+# Source and test files
 src/**
-.gitignore
-.yarnrc
-.npmrc
-**/*.map
-**/*.ts
-!dist/**/*.d.ts
-tsconfig.json
-node_modules/**
+tests/**
 coverage/**
+
+# Build config
+tsconfig.json
+eslint.config.mjs
+vitest.config.*
+.eslintrc*
+.prettierrc
+
+# Dev tooling
+.vscode/**
+.cursor/**
+.vscode-test/**
 .github/**
+.yarn/**
+.kodrdriv-test-cache.json
+
+# Git/npm
+.gitignore
+.npmignore
+.nvmrc
+.yarnrc.yml
+yarn.lock
+
+# Misc
+*.tgz
 *.log
-.DS_Store
 .env
 .env.*
-*.vsix
+.DS_Store
+
+# Dev-only node_modules content (keep production deps)
+node_modules/.package-lock.json

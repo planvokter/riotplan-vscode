@@ -20,6 +20,11 @@ import { ProjectDetailPanel } from './project-detail-panel';
 import { StatusTreeProvider } from './status-provider';
 import { DashboardViewProvider } from './dashboard-view';
 import { ProjectsTreeProvider } from './projects-provider';
+import { MultiServerConnectionManager } from './multiServer/connectionManager';
+import { ServerProfilesStore } from './multiServer/profilesStore';
+import { sanitizeToken, tokenStorageKey } from './multiServer/auth';
+import { MultiServerAggregator } from './multiServer/aggregator';
+import { fromServerScopedRef } from './multiServer/types';
 
 interface ContextProject {
     id?: string;
@@ -56,13 +61,15 @@ interface PlanTransferFile {
 }
 
 let mcpClient: HttpMcpClient;
+let connectionManager: MultiServerConnectionManager;
+let profilesStore: ServerProfilesStore;
+let aggregator: MultiServerAggregator;
 let plansProvider: PlansTreeProvider;
 let projectsProvider: ProjectsTreeProvider;
 let statusProvider: StatusTreeProvider;
 let dashboardProvider: DashboardViewProvider;
 let currentServerUrl = 'http://127.0.0.1:3002';
 let extensionContextRef: vscode.ExtensionContext;
-let currentApiKey: string | undefined;
 let currentProxyBypass = false;
 const PLAN_LIST_AUTO_REFRESH_MS = 5 * 60 * 1000;
 const PLAN_DETAIL_AUTO_REFRESH_MS = 2 * 60 * 1000;
@@ -71,17 +78,18 @@ export async function activate(context: vscode.ExtensionContext) {
     console.log('RiotPlan extension is now active');
     extensionContextRef = context;
 
-    currentServerUrl = getConfiguredServerUrl();
-    currentApiKey = getConfiguredApiKey();
+    // Initialize core objects synchronously so commands can reference them.
+    profilesStore = new ServerProfilesStore();
+    connectionManager = new MultiServerConnectionManager();
+    currentServerUrl = getLegacyServerUrl() || 'http://127.0.0.1:3002';
     currentProxyBypass = getConfiguredProxyBypass();
-
-    mcpClient = new HttpMcpClient(currentServerUrl, currentApiKey, currentProxyBypass);
-    plansProvider = new PlansTreeProvider(mcpClient);
-    projectsProvider = new ProjectsTreeProvider(mcpClient);
+    mcpClient = new HttpMcpClient(currentServerUrl, undefined, currentProxyBypass);
+    aggregator = new MultiServerAggregator(connectionManager);
+    plansProvider = new PlansTreeProvider(aggregator as any);
+    projectsProvider = new ProjectsTreeProvider(aggregator as any);
     statusProvider = new StatusTreeProvider(mcpClient, currentServerUrl);
     dashboardProvider = new DashboardViewProvider(context.extensionUri);
-    dashboardProvider.setClient(mcpClient);
-    syncDashboardFilters();
+    dashboardProvider.setClient(aggregator as any);
 
     function syncDashboardFilters(): void {
         dashboardProvider.setFilters({
@@ -91,21 +99,107 @@ export async function activate(context: vscode.ExtensionContext) {
         });
     }
 
-    function applyConnectionSettings(newUrl: string, apiKey?: string, proxyBypass?: boolean): void {
+    syncDashboardFilters();
+
+    async function refreshServerStatuses(): Promise<void> {
+        const profileMap = new Map(connectionManager.getProfiles().map((profile) => [profile.id, profile]));
+        const activeId = connectionManager.getActiveServerId();
+        const statuses = await Promise.all(connectionManager.getStatuses().map(async (status) => {
+            const profile = profileMap.get(status.serverId);
+            const secret = await context.secrets.get(tokenStorageKey(status.serverId));
+            return {
+                serverId: status.serverId,
+                serverName: profile?.name || status.serverId,
+                serverUrl: status.serverUrl || profile?.url || '',
+                state: status.state,
+                lastError: status.lastError,
+                hasApiKey: Boolean(sanitizeToken(secret)),
+                isActive: status.serverId === activeId,
+            };
+        }));
+        statusProvider.setServerStatuses(statuses);
+    }
+
+    function applyConnectionSettings(newUrl: string, proxyBypass?: boolean): void {
         currentServerUrl = newUrl;
-        currentApiKey = apiKey?.trim() || undefined;
         currentProxyBypass = proxyBypass ?? currentProxyBypass;
-        mcpClient = new HttpMcpClient(newUrl, currentApiKey, currentProxyBypass);
-        plansProvider.updateClient(mcpClient);
+        mcpClient = new HttpMcpClient(newUrl, undefined, currentProxyBypass);
+        plansProvider.updateClient(aggregator as any);
         statusProvider.updateClient(mcpClient, newUrl);
-        dashboardProvider.setClient(mcpClient);
-        projectsProvider.updateClient(mcpClient);
+        dashboardProvider.setClient(aggregator as any);
+        projectsProvider.updateClient(aggregator as any);
         PlanDetailPanel.updateClientForAll(mcpClient);
         ProjectDetailPanel.updateClientForAll(mcpClient);
         syncDashboardFilters();
         plansProvider.refresh();
         projectsProvider.refresh();
         void checkConnection(newUrl);
+        void refreshServerStatuses();
+    }
+
+    async function reloadConnectionsFromProfiles(): Promise<void> {
+        try {
+            const fallbackServerUrl = getLegacyServerUrl();
+            const fallbackProxyBypass = getConfiguredProxyBypass();
+            const { profiles, activeServerId: configuredActiveServerId } = await profilesStore.loadProfiles(
+                fallbackServerUrl,
+                fallbackProxyBypass
+            );
+            connectionManager.configureProfiles(profiles, configuredActiveServerId);
+            await hydrateProfileApiKeys(context, profiles);
+            await connectionManager.connectAll();
+            aggregator = new MultiServerAggregator(connectionManager);
+
+            let nextActiveServerId: string | undefined = configuredActiveServerId;
+            if (!nextActiveServerId || !profiles.some((profile) => profile.id === nextActiveServerId && profile.enabled)) {
+                nextActiveServerId = profiles.find((profile) => profile.enabled)?.id;
+                if (nextActiveServerId) {
+                    await profilesStore.setActiveServerId(nextActiveServerId);
+                    connectionManager.setActiveServerId(nextActiveServerId);
+                }
+            }
+
+            const activeClient = connectionManager.getActiveClient();
+            if (activeClient) {
+                mcpClient = activeClient;
+                currentServerUrl = mcpClient.baseUrl;
+            }
+
+            plansProvider.updateClient(aggregator as any);
+            projectsProvider.updateClient(aggregator as any);
+            statusProvider.updateClient(mcpClient, currentServerUrl);
+            dashboardProvider.setClient(aggregator as any);
+            syncDashboardFilters();
+            plansProvider.refresh();
+            projectsProvider.refresh();
+            await refreshServerStatuses();
+            await checkConnection(currentServerUrl);
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            console.error('Failed to reload connections from profiles:', message);
+            vscode.window.showWarningMessage(`RiotPlan connection setup failed: ${message}`);
+        }
+    }
+
+    async function pickServerProfile(title: string): Promise<{ id: string; name: string; url: string } | undefined> {
+        const profiles = connectionManager.getProfiles();
+        if (profiles.length === 0) {
+            vscode.window.showWarningMessage('No server profiles are configured.');
+            return undefined;
+        }
+        const selection = await vscode.window.showQuickPick(
+            profiles.map((profile) => ({
+                label: profile.name,
+                description: profile.url,
+                detail: profile.id,
+                profile,
+            })),
+            {
+                title,
+                placeHolder: 'Select a server profile',
+            }
+        );
+        return selection?.profile;
     }
 
     // Register tree views
@@ -134,12 +228,7 @@ export async function activate(context: vscode.ExtensionContext) {
         })
     );
 
-    // Check server health and update connection status
-    checkConnection(currentServerUrl);
-
-    // Periodic sync:
-    // - Plan list refresh every 5 minutes
-    // - Open detail panel refresh every 2 minutes
+    // Periodic sync
     const listRefreshTimer = setInterval(() => {
         try {
             plansProvider.refresh();
@@ -162,7 +251,7 @@ export async function activate(context: vscode.ExtensionContext) {
         })
     );
 
-    // Register commands
+    // ── Register ALL commands before any async work ──
     context.subscriptions.push(
         vscode.commands.registerCommand('riotplan.refreshPlans', () => {
             plansProvider.refresh();
@@ -345,15 +434,515 @@ export async function activate(context: vscode.ExtensionContext) {
                         : vscode.ConfigurationTarget.Global;
 
             await config.update('serverUrl', nextUrl, target);
-            applyConnectionSettings(nextUrl, getConfiguredApiKey(), getConfiguredProxyBypass());
+            applyConnectionSettings(nextUrl, getConfiguredProxyBypass());
         })
     );
 
     context.subscriptions.push(
         vscode.commands.registerCommand('riotplan.reconnect', async () => {
-            checkConnection(currentServerUrl);
-            plansProvider.refresh();
-            projectsProvider.refresh();
+            await reloadConnectionsFromProfiles();
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('riotplan.configureApiKey', async (serverId?: string) => {
+            const profile = serverId
+                ? connectionManager.getProfiles().find((entry) => entry.id === serverId)
+                : await pickServerProfile('Configure API token');
+            if (!profile) {
+                return;
+            }
+            const token = await vscode.window.showInputBox({
+                title: `API token: ${profile.name}`,
+                prompt: 'Enter API token for this server profile',
+                ignoreFocusOut: true,
+                password: true,
+                validateInput: (value) => (value.trim().length > 0 ? null : 'API token cannot be empty'),
+            });
+            if (!token?.trim()) {
+                return;
+            }
+            const sanitized = sanitizeToken(token);
+            if (!sanitized) {
+                return;
+            }
+            await context.secrets.store(tokenStorageKey(profile.id), sanitized);
+            connectionManager.setClientApiKey(profile.id, sanitized);
+            await refreshServerStatuses();
+            vscode.window.showInformationMessage(`Configured token for "${profile.name}".`);
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('riotplan.clearApiKey', async (serverId?: string) => {
+            const profile = serverId
+                ? connectionManager.getProfiles().find((entry) => entry.id === serverId)
+                : await pickServerProfile('Clear API token');
+            if (!profile) {
+                return;
+            }
+            const confirmation = await vscode.window.showWarningMessage(
+                `Clear API token for "${profile.name}"?`,
+                { modal: true },
+                'Clear',
+                'Cancel'
+            );
+            if (confirmation !== 'Clear') {
+                return;
+            }
+            await context.secrets.delete(tokenStorageKey(profile.id));
+            connectionManager.setClientApiKey(profile.id, undefined);
+            await refreshServerStatuses();
+            vscode.window.showInformationMessage(`Cleared token for "${profile.name}".`);
+        })
+    );
+
+    async function addServerConnection(): Promise<void> {
+        const profiles = connectionManager.getProfiles();
+        const name = await vscode.window.showInputBox({
+            title: 'Add server connection',
+            prompt: 'Profile name',
+            validateInput: (value) => (value.trim().length > 0 ? null : 'Profile name is required'),
+        });
+        if (!name?.trim()) {
+            return;
+        }
+        const url = await vscode.window.showInputBox({
+            title: 'Add server connection',
+            prompt: 'Server URL',
+            value: 'http://127.0.0.1:3002',
+            validateInput: (value) => {
+                try {
+                    const parsed = new URL(value.trim());
+                    return /^https?:$/.test(parsed.protocol) ? null : 'URL must use http or https';
+                } catch {
+                    return 'Enter a valid URL';
+                }
+            },
+        });
+        if (!url?.trim()) {
+            return;
+        }
+        const bypassChoice = await vscode.window.showQuickPick(
+            [
+                { label: 'Use system proxy settings', value: false },
+                { label: 'Bypass proxy for this server', value: true },
+            ],
+            {
+                title: 'Proxy behavior',
+            }
+        );
+        if (!bypassChoice) {
+            return;
+        }
+
+        const timestamp = new Date().toISOString();
+        const nextProfiles = [...profiles, {
+            id: randomUUID(),
+            name: name.trim(),
+            url: url.trim(),
+            enabled: true,
+            proxyBypass: bypassChoice.value,
+            createdAt: timestamp,
+            updatedAt: timestamp,
+        }];
+        await profilesStore.saveProfiles(nextProfiles);
+        await reloadConnectionsFromProfiles();
+    }
+
+    async function switchServerConnection(): Promise<void> {
+        const selected = await pickServerProfile('Switch active server');
+        if (!selected) {
+            return;
+        }
+        await profilesStore.setActiveServerId(selected.id);
+        connectionManager.setActiveServerId(selected.id);
+        await reloadConnectionsFromProfiles();
+        vscode.window.showInformationMessage(`Active server set to "${selected.name}".`);
+    }
+
+    async function showServerConnectionDetails(serverId?: string): Promise<void> {
+        let selected: { id: string; name: string; url: string } | undefined;
+        if (serverId) {
+            const profile = connectionManager.getProfiles().find((p) => p.id === serverId);
+            if (profile) {
+                selected = profile;
+            }
+        }
+        if (!selected) {
+            selected = await pickServerProfile('Server connection details');
+        }
+        if (!selected) {
+            return;
+        }
+        const secret = await context.secrets.get(tokenStorageKey(selected.id));
+        const tokenState = sanitizeToken(secret) ? 'Configured (secret storage)' : 'Not configured';
+        const status = connectionManager.getStatuses().find((entry) => entry.serverId === selected!.id);
+        const connectionState = status?.state || 'disconnected';
+        const sessionId = status?.sessionId || undefined;
+
+        const lines = [
+            `Server: ${selected.name}`,
+            `URL: ${selected.url}`,
+            `Status: ${connectionState.charAt(0).toUpperCase() + connectionState.slice(1)}`,
+            sessionId ? `Connected Session ID: ${sessionId}` : undefined,
+            `API Token: ${tokenState}`,
+            status?.lastError ? `Error: ${status.lastError}` : undefined,
+        ].filter(Boolean).join('\n');
+
+        const isActive = connectionManager.getActiveServerId() === selected.id;
+        const actions = isActive
+            ? ['Configure Token', 'Reconnect']
+            : ['Switch to this Server', 'Configure Token', 'Reconnect'];
+
+        const action = await vscode.window.showInformationMessage(
+            lines,
+            { modal: false },
+            ...actions
+        );
+
+        if (action === 'Switch to this Server') {
+            await profilesStore.setActiveServerId(selected.id);
+            connectionManager.setActiveServerId(selected.id);
+            await reloadConnectionsFromProfiles();
+            vscode.window.showInformationMessage(`Active server set to "${selected.name}".`);
+        } else if (action === 'Configure Token') {
+            await vscode.commands.executeCommand('riotplan.configureApiKey');
+        } else if (action === 'Reconnect') {
+            await reloadConnectionsFromProfiles();
+        }
+    }
+
+    async function removeServerConnection(): Promise<void> {
+        const selected = await pickServerProfile('Remove server connection');
+        if (!selected) {
+            return;
+        }
+        const confirmation = await vscode.window.showWarningMessage(
+            `Remove server profile "${selected.name}"?`,
+            { modal: true },
+            'Remove',
+            'Cancel'
+        );
+        if (confirmation !== 'Remove') {
+            return;
+        }
+        const profiles = connectionManager.getProfiles();
+        const updatedProfiles = profiles.filter((profile) => profile.id !== selected.id);
+        await profilesStore.saveProfiles(updatedProfiles);
+        await context.secrets.delete(tokenStorageKey(selected.id));
+        await reloadConnectionsFromProfiles();
+    }
+
+    function resolvePlanCodeCandidate(plan: PlanSelectionInput, scopedRef: string, downloadedFilename: string): string {
+        const fromLabel = typeof plan?.label === 'string' ? plan.label.trim() : '';
+        if (fromLabel) {
+            return sanitizePlanCode(fromLabel);
+        }
+        const fromName = typeof plan?.name === 'string' ? plan.name.trim() : '';
+        if (fromName) {
+            return sanitizePlanCode(fromName);
+        }
+        const fromRef = sanitizePlanCode(fromServerScopedRef(scopedRef)?.value || scopedRef);
+        if (fromRef) {
+            return fromRef;
+        }
+        return sanitizePlanCode(downloadedFilename.replace(/\.plan$/i, ''));
+    }
+
+    function findTargetPlanConflict(plans: any[], candidateCode: string): string | undefined {
+        const normalized = candidateCode.toLowerCase();
+        for (const plan of plans) {
+            const values = [
+                typeof plan?.code === 'string' ? plan.code : '',
+                typeof plan?.name === 'string' ? plan.name : '',
+                typeof plan?.title === 'string' ? plan.title : '',
+                typeof plan?.id === 'string' ? plan.id : '',
+                typeof plan?.path === 'string' ? basename(plan.path) : '',
+            ]
+                .map((value) => sanitizePlanCode(value))
+                .filter(Boolean);
+            if (values.some((value) => value.toLowerCase() === normalized)) {
+                return resolvePlanRef(plan);
+            }
+        }
+        return undefined;
+    }
+
+    async function transferPlanToServer(plan: PlanSelectionInput): Promise<void> {
+        const scopedPlanRef = resolvePlanRef(plan);
+        if (!scopedPlanRef) {
+            vscode.window.showWarningMessage('Unable to determine plan reference for this item.');
+            return;
+        }
+        const sourceScoped = fromServerScopedRef(scopedPlanRef);
+        const sourceServerId = sourceScoped?.serverId || connectionManager.getActiveServerId();
+        const sourceServer = sourceServerId
+            ? connectionManager.getProfiles().find((profile) => profile.id === sourceServerId)
+            : undefined;
+
+        const candidates = connectionManager.getProfiles().filter((profile) => {
+            if (!profile.enabled) {
+                return false;
+            }
+            if (!sourceServerId) {
+                return true;
+            }
+            return profile.id !== sourceServerId;
+        });
+        if (candidates.length === 0) {
+            vscode.window.showWarningMessage('No other enabled servers are available for transfer.');
+            return;
+        }
+
+        const targetSelection = await vscode.window.showQuickPick(
+            candidates.map((profile) => ({
+                label: profile.name,
+                description: profile.url,
+                detail: profile.id,
+                profile,
+            })),
+            {
+                title: 'Transfer Plan to Server',
+                placeHolder: 'Select target server',
+                ignoreFocusOut: true,
+            }
+        );
+        if (!targetSelection) {
+            return;
+        }
+
+        const modeSelection = await vscode.window.showQuickPick(
+            [
+                { label: 'Move', description: 'Copy to target, then remove from source', mode: 'move' as const },
+                { label: 'Copy', description: 'Keep source plan and add to target', mode: 'copy' as const },
+            ],
+            {
+                title: 'Transfer Mode',
+                placeHolder: 'Select transfer mode',
+                ignoreFocusOut: true,
+            }
+        );
+        if (!modeSelection) {
+            return;
+        }
+
+        const { client: sourceClient, planRef } = resolvePlanClientAndRef(scopedPlanRef);
+        const targetProfile = targetSelection.profile;
+        let targetClient = connectionManager.getClient(targetProfile.id);
+        if (!targetClient) {
+            await connectionManager.connect(targetProfile.id);
+            targetClient = connectionManager.getClient(targetProfile.id);
+        }
+        if (!targetClient) {
+            vscode.window.showErrorMessage(`Failed to connect to target server "${targetProfile.name}".`);
+            return;
+        }
+
+        await vscode.window.withProgress(
+            {
+                location: vscode.ProgressLocation.Notification,
+                title: `Transferring "${plan?.label || planRef}"`,
+                cancellable: false,
+            },
+            async (progress) => {
+                progress.report({ message: 'Downloading from source server...' });
+                const downloaded = await sourceClient.downloadPlanFile(planRef);
+                const candidateCode = resolvePlanCodeCandidate(plan, scopedPlanRef, downloaded.filename);
+
+                progress.report({ message: 'Checking target conflicts...' });
+                const targetListResponse = await targetClient.listPlans('all');
+                const targetPlans = JSON.parse(String(targetListResponse?.content?.[0]?.text || '{"plans": []}')).plans || [];
+                const conflictingPlanRef = findTargetPlanConflict(targetPlans, candidateCode);
+
+                let uploadFilename = downloaded.filename;
+                if (conflictingPlanRef) {
+                    const conflictAction = await vscode.window.showQuickPick(
+                        [
+                            { label: 'Overwrite', value: 'overwrite' as const, description: 'Delete existing target plan then upload' },
+                            { label: 'Rename', value: 'rename' as const, description: 'Upload with a new plan filename' },
+                            { label: 'Skip', value: 'skip' as const, description: 'Cancel transfer for this plan' },
+                        ],
+                        {
+                            title: 'Plan conflict detected',
+                            placeHolder: `A plan with code "${candidateCode}" exists on ${targetProfile.name}.`,
+                            ignoreFocusOut: true,
+                        }
+                    );
+                    if (!conflictAction || conflictAction.value === 'skip') {
+                        return;
+                    }
+                    if (conflictAction.value === 'overwrite') {
+                        progress.report({ message: 'Removing conflicting plan on target...' });
+                        await targetClient.deletePlan(conflictingPlanRef);
+                    } else if (conflictAction.value === 'rename') {
+                        const renamed = await vscode.window.showInputBox({
+                            title: 'Rename transferred plan',
+                            prompt: 'Enter a new plan code/filename',
+                            value: `${candidateCode}-copy`,
+                            ignoreFocusOut: true,
+                            validateInput: (value) => (sanitizePlanCode(value).length > 0 ? null : 'Enter a valid name'),
+                        });
+                        if (!renamed?.trim()) {
+                            return;
+                        }
+                        uploadFilename = `${sanitizePlanCode(renamed)}.plan`;
+                    }
+                }
+
+                progress.report({ message: `Uploading to ${targetProfile.name}...` });
+                await targetClient.uploadPlanFile(uploadFilename, downloaded.content);
+
+                if (modeSelection.mode === 'move') {
+                    progress.report({ message: 'Removing source plan...' });
+                    await sourceClient.deletePlan(planRef);
+                }
+            }
+        );
+
+        plansProvider.refresh();
+        projectsProvider.refresh();
+        await refreshServerStatuses();
+        const modeLabel = modeSelection.mode === 'move' ? 'Moved' : 'Copied';
+        vscode.window.showInformationMessage(`${modeLabel} plan to "${targetProfile.name}".`);
+        if (sourceServer) {
+            void checkConnection(sourceServer.url);
+        }
+    }
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('riotplan.openServerManager', async () => {
+            try {
+                const action = await vscode.window.showQuickPick(
+                    [
+                        { label: 'Add server connection', value: 'add' },
+                        { label: 'Switch active server', value: 'switch' },
+                        { label: 'Show server connection details', value: 'details' },
+                        { label: 'Edit server URL', value: 'edit' },
+                        { label: 'Remove server profile', value: 'remove' },
+                        { label: 'Configure API token', value: 'setToken' },
+                        { label: 'Clear API token', value: 'clearToken' },
+                        { label: 'Reconnect all servers', value: 'reconnect' },
+                        { label: 'Open RiotPlan settings (UI)', value: 'settingsUi' },
+                        { label: 'Open RiotPlan settings (JSON)', value: 'settingsJson' },
+                    ],
+                    {
+                        title: 'Manage Servers and Tokens',
+                        placeHolder: 'Choose a server management action',
+                    }
+                );
+                if (!action) {
+                    return;
+                }
+                if (action.value === 'setToken') {
+                    await vscode.commands.executeCommand('riotplan.configureApiKey');
+                    return;
+                }
+                if (action.value === 'clearToken') {
+                    await vscode.commands.executeCommand('riotplan.clearApiKey');
+                    return;
+                }
+                if (action.value === 'reconnect') {
+                    await reloadConnectionsFromProfiles();
+                    return;
+                }
+                if (action.value === 'settingsUi') {
+                    await vscode.commands.executeCommand('workbench.action.openSettings', '@ext:kjerneverk.riotplan-vscode');
+                    return;
+                }
+                if (action.value === 'settingsJson') {
+                    await vscode.commands.executeCommand('workbench.action.openSettingsJson');
+                    return;
+                }
+                if (action.value === 'add') {
+                    await addServerConnection();
+                    return;
+                }
+                if (action.value === 'switch') {
+                    await switchServerConnection();
+                    return;
+                }
+                if (action.value === 'details') {
+                    await showServerConnectionDetails();
+                    return;
+                }
+                if (action.value === 'remove') {
+                    await removeServerConnection();
+                    return;
+                }
+
+                const selected = await pickServerProfile('Select server profile');
+                if (!selected) {
+                    return;
+                }
+
+                if (action.value === 'switch') {
+                    await profilesStore.setActiveServerId(selected.id);
+                    connectionManager.setActiveServerId(selected.id);
+                    await reloadConnectionsFromProfiles();
+                    vscode.window.showInformationMessage(`Active server set to "${selected.name}".`);
+                    return;
+                }
+
+                if (action.value === 'edit') {
+                    const nextUrl = await vscode.window.showInputBox({
+                        title: `Edit server URL: ${selected.name}`,
+                        value: selected.url,
+                        validateInput: (value) => {
+                            try {
+                                const parsed = new URL(value.trim());
+                                return /^https?:$/.test(parsed.protocol) ? null : 'URL must use http or https';
+                            } catch {
+                                return 'Enter a valid URL';
+                            }
+                        },
+                    });
+                    if (!nextUrl?.trim()) {
+                        return;
+                    }
+                    const profiles = connectionManager.getProfiles();
+                    const updatedProfiles = profiles.map((profile) => {
+                        if (profile.id !== selected.id) {
+                            return profile;
+                        }
+                        return {
+                            ...profile,
+                            url: nextUrl.trim(),
+                            updatedAt: new Date().toISOString(),
+                        };
+                    });
+                    await profilesStore.saveProfiles(updatedProfiles);
+                    await reloadConnectionsFromProfiles();
+                    return;
+                }
+            } catch (error) {
+                const message = error instanceof Error ? error.message : String(error);
+                vscode.window.showErrorMessage(`Manage Servers and Tokens failed: ${message}`);
+            }
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('riotplan.addServerConnection', async () => {
+            await addServerConnection();
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('riotplan.switchServerConnection', async () => {
+            await switchServerConnection();
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('riotplan.showServerConnectionDetails', async (serverId?: string) => {
+            await showServerConnectionDetails(serverId);
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('riotplan.removeServerConnection', async () => {
+            await removeServerConnection();
         })
     );
 
@@ -372,12 +961,13 @@ export async function activate(context: vscode.ExtensionContext) {
                     return;
                 }
                 const sourcePlan = selectedPlans[0];
-                const planRef = resolvePlanRef(sourcePlan);
-                if (!planRef) {
+                const scopedPlanRef = resolvePlanRef(sourcePlan);
+                if (!scopedPlanRef) {
                     vscode.window.showWarningMessage('Unable to determine plan reference for this item.');
                     return;
                 }
-                const downloaded = await mcpClient.downloadPlanFile(planRef);
+                const { client, planRef } = resolvePlanClientAndRef(scopedPlanRef);
+                const downloaded = await client.downloadPlanFile(planRef);
                 const defaultName = sanitizeFileName(downloaded.filename.replace(/\.plan$/i, '') || sourcePlan.label || 'plan');
                 const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri;
                 const target = await vscode.window.showSaveDialog({
@@ -394,6 +984,17 @@ export async function activate(context: vscode.ExtensionContext) {
                 vscode.window.showInformationMessage(`Downloaded ${defaultName}.plan`);
             } catch (error) {
                 vscode.window.showErrorMessage(`Failed to download plan: ${error instanceof Error ? error.message : String(error)}`);
+            }
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('riotplan.transferPlan', async (plan: PlanSelectionInput) => {
+            try {
+                await transferPlanToServer(plan);
+            } catch (error) {
+                const message = error instanceof Error ? error.message : String(error);
+                vscode.window.showErrorMessage(`Failed to transfer plan: ${message}`);
             }
         })
     );
@@ -442,9 +1043,10 @@ export async function activate(context: vscode.ExtensionContext) {
             };
 
             const outcomes = await Promise.allSettled(
-                selectedPlans.map(async (planRef) => {
-                    await mcpClient.bindProject(planRef, bindingPayload);
-                    return planRef;
+                selectedPlans.map(async (scopedPlanRef) => {
+                    const { client, planRef } = resolvePlanClientAndRef(scopedPlanRef);
+                    await client.bindProject(planRef, bindingPayload);
+                    return scopedPlanRef;
                 })
             );
 
@@ -492,15 +1094,15 @@ export async function activate(context: vscode.ExtensionContext) {
 
     context.subscriptions.push(
         vscode.commands.registerCommand('riotplan.renamePlan', async (plan: PlanSelectionInput, currentName?: string) => {
-            const planRef = resolvePlanRef(plan);
-            if (!planRef) {
+            const scopedPlanRef = resolvePlanRef(plan);
+            if (!scopedPlanRef) {
                 vscode.window.showWarningMessage('Unable to determine plan reference for this item.');
                 return;
             }
 
             const initialValue = (typeof currentName === 'string' && currentName.trim())
                 || (typeof plan?.label === 'string' && plan.label.trim())
-                || planRef;
+                || scopedPlanRef;
             const nextName = await vscode.window.showInputBox({
                 title: 'Rename Plan',
                 prompt: 'Enter a new plan title',
@@ -528,7 +1130,8 @@ export async function activate(context: vscode.ExtensionContext) {
             }
 
             try {
-                await mcpClient.renamePlan(planRef, trimmedName);
+                const { client, planRef } = resolvePlanClientAndRef(scopedPlanRef);
+                await client.renamePlan(planRef, trimmedName);
                 PlanDetailPanel.applyPlanTitleUpdate(planRef, trimmedName);
                 plansProvider.refresh();
                 vscode.window.showInformationMessage(`Renamed plan to "${trimmedName}".`);
@@ -595,29 +1198,47 @@ export async function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(
         vscode.workspace.onDidChangeConfiguration((e) => {
             if (
+                e.affectsConfiguration('riotplan.serverProfiles') ||
+                e.affectsConfiguration('riotplan.activeServerId') ||
                 e.affectsConfiguration('riotplan.serverUrl') ||
-                e.affectsConfiguration('riotplan.apiKey') ||
                 e.affectsConfiguration('riotplan.proxyBypass')
             ) {
-                const newUrl = getConfiguredServerUrl();
-                const apiKey = getConfiguredApiKey();
-                const proxyBypass = getConfiguredProxyBypass();
-                applyConnectionSettings(newUrl, apiKey, proxyBypass);
+                void reloadConnectionsFromProfiles();
             }
         })
     );
-}
 
-function getConfiguredServerUrl(): string {
-    const folderUri = vscode.workspace.workspaceFolders?.[0]?.uri;
-    if (folderUri) {
-        const folderValue = vscode.workspace.getConfiguration('riotplan', folderUri).get<string>('serverUrl');
-        if (typeof folderValue === 'string' && folderValue.trim()) {
-            return folderValue.trim();
+    // ── Async connection bootstrap (runs AFTER all commands are registered) ──
+    // Failures here produce warnings but never prevent the extension from loading.
+    try {
+        const fallbackServerUrl = getLegacyServerUrl();
+        const fallbackProxyBypass = getConfiguredProxyBypass();
+        const { profiles, activeServerId } = await profilesStore.loadProfiles(fallbackServerUrl, fallbackProxyBypass);
+        connectionManager.configureProfiles(profiles, activeServerId);
+        await hydrateProfileApiKeys(context, profiles);
+        await connectionManager.connectAll();
+        aggregator = new MultiServerAggregator(connectionManager);
+
+        const activeClient = connectionManager.getActiveClient();
+        if (activeClient) {
+            mcpClient = activeClient;
+            currentServerUrl = mcpClient.baseUrl;
         }
+
+        plansProvider.updateClient(aggregator as any);
+        projectsProvider.updateClient(aggregator as any);
+        statusProvider.updateClient(mcpClient, currentServerUrl);
+        dashboardProvider.setClient(aggregator as any);
+        syncDashboardFilters();
+        plansProvider.refresh();
+        projectsProvider.refresh();
+        void refreshServerStatuses();
+        void checkConnection(currentServerUrl);
+    } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error('RiotPlan activation connection setup failed:', message);
+        vscode.window.showWarningMessage(`RiotPlan: server connection failed on startup. Use "Manage Servers and Tokens" to configure. (${message})`);
     }
-    const globalValue = vscode.workspace.getConfiguration('riotplan').get<string>('serverUrl', 'http://127.0.0.1:3002');
-    return globalValue.trim() || 'http://127.0.0.1:3002';
 }
 
 function getConfiguredProxyBypass(): boolean {
@@ -631,33 +1252,23 @@ function getConfiguredProxyBypass(): boolean {
     return vscode.workspace.getConfiguration('riotplan').get<boolean>('proxyBypass', false);
 }
 
-function getConfiguredApiKey(): string | undefined {
-    const folderUri = vscode.workspace.workspaceFolders?.[0]?.uri;
-    if (folderUri) {
-        const folderValue = vscode.workspace.getConfiguration('riotplan', folderUri).get<string>('apiKey');
-        if (typeof folderValue === 'string' && folderValue.trim()) {
-            return folderValue.trim();
-        }
-    }
-    const value = vscode.workspace.getConfiguration('riotplan').get<string>('apiKey', '').trim();
-    return value || undefined;
-}
-
 async function openPlan(plan: PlanItem | any): Promise<void> {
     if (typeof plan === 'string' && plan.trim()) {
-        const planRef = plan.trim();
-        await maybeRemapTransferredPlan(planRef);
-        PlanDetailPanel.createOrShow(planRef, planRef, mcpClient);
+        const scopedRef = plan.trim();
+        const { client, planRef } = resolvePlanClientAndRef(scopedRef);
+        await maybeRemapTransferredPlan(scopedRef);
+        PlanDetailPanel.createOrShow(planRef, planRef, client);
         return;
     }
 
-    const planRef = resolvePlanRef(plan);
-    const planName = plan?.label || plan?.name || plan?.title || plan?.code || planRef || 'Plan';
-    if (!planRef || typeof planRef !== 'string') {
+    const scopedRef = resolvePlanRef(plan);
+    const planName = plan?.label || plan?.name || plan?.title || plan?.code || scopedRef || 'Plan';
+    if (!scopedRef || typeof scopedRef !== 'string') {
         return;
     }
-    await maybeRemapTransferredPlan(planRef);
-    PlanDetailPanel.createOrShow(planRef, planName, mcpClient, plan?.project);
+    const { client, planRef } = resolvePlanClientAndRef(scopedRef);
+    await maybeRemapTransferredPlan(scopedRef);
+    PlanDetailPanel.createOrShow(planRef, planName, client, plan?.project);
 }
 
 function resolvePlanRef(plan: PlanItem | any): string | undefined {
@@ -673,6 +1284,15 @@ function resolvePlanRef(plan: PlanItem | any): string | undefined {
         return ref.trim();
     }
     return undefined;
+}
+
+function resolvePlanClientAndRef(scopedPlanRef: string): { client: HttpMcpClient; planRef: string } {
+    const scoped = fromServerScopedRef(scopedPlanRef);
+    if (!scoped) {
+        return { client: mcpClient, planRef: scopedPlanRef };
+    }
+    const client = aggregator.getClientForServer(scoped.serverId) || mcpClient;
+    return { client, planRef: scoped.value };
 }
 
 function uniquePlanItems(plan: PlanSelectionInput, selections?: PlanSelectionInput[]): PlanSelectionInput[] {
@@ -705,9 +1325,10 @@ async function resolveProjectFromSource(
     let projectId = typeof project?.id === 'string' ? project.id : undefined;
 
     if (!projectId) {
-        const planRef = resolvePlanRef(source);
-        if (planRef) {
-            const binding = await mcpClient.getProjectBinding(planRef).catch(() => null);
+        const scopedPlanRef = resolvePlanRef(source);
+        if (scopedPlanRef) {
+            const { client, planRef } = resolvePlanClientAndRef(scopedPlanRef);
+            const binding = await client.getProjectBinding(planRef).catch(() => null);
             project = binding?.project;
             projectId = typeof project?.id === 'string' ? project.id : undefined;
         }
@@ -760,13 +1381,17 @@ function bindingSignature(binding: any): string {
 
 async function maybeRemapTransferredPlan(planRef: string): Promise<void> {
     try {
-        const binding = await mcpClient.getProjectBinding(planRef);
+        const resolved = resolvePlanClientAndRef(planRef);
+        const binding = await resolved.client.getProjectBinding(resolved.planRef);
         if (!binding || binding.source === 'explicit' || !binding.project) {
             return;
         }
 
-        const resolved = await mcpClient.resolveProjectContext(planRef, vscode.workspace.workspaceFolders?.[0]?.uri.fsPath);
-        if (resolved?.resolved) {
+        const projectContext = await resolved.client.resolveProjectContext(
+            resolved.planRef,
+            vscode.workspace.workspaceFolders?.[0]?.uri.fsPath
+        );
+        if (projectContext?.resolved) {
             return;
         }
 
@@ -801,7 +1426,7 @@ async function maybeRemapTransferredPlan(planRef: string): Promise<void> {
             if (!selected?.id) {
                 return;
             }
-            await mcpClient.bindProject(planRef, {
+            await resolved.client.bindProject(resolved.planRef, {
                 id: selected.id,
                 name: selected.name || selected.id,
                 repo: selected.repo,
@@ -821,11 +1446,11 @@ async function maybeRemapTransferredPlan(planRef: string): Promise<void> {
         if (!projectNameInput || !projectNameInput.trim()) {
             return;
         }
-        const existingProjects = await mcpClient.listContextProjects(true).catch(() => []);
+        const existingProjects = await resolved.client.listContextProjects(true).catch(() => []);
         const projectName = projectNameInput.trim();
         const projectId = makeProjectId(projectName, existingProjects);
-        await mcpClient.createContextProject(buildDefaultProjectEntity(projectId, projectName));
-        await mcpClient.bindProject(planRef, {
+        await resolved.client.createContextProject(buildDefaultProjectEntity(projectId, projectName));
+        await resolved.client.bindProject(resolved.planRef, {
             id: projectId,
             name: projectName,
             repo: binding?.project?.repo,
@@ -1041,42 +1666,6 @@ async function importPlanFromTransfer(transfer: PlanTransferFile): Promise<void>
     }
 }
 
-async function buildTransferFile(sourcePlan: PlanSelectionInput): Promise<PlanTransferFile> {
-    const planRef = resolvePlanRef(sourcePlan);
-    if (!planRef) {
-        throw new Error('Unable to resolve selected plan.');
-    }
-
-    const [planData, ideaArtifact] = await Promise.all([
-        mcpClient.getPlanResource(planRef),
-        mcpClient.getArtifact(planRef, 'idea').catch(() => ({ content: null })),
-    ]);
-
-    const code = firstNonEmptyString(planData?.code, planData?.id, sourcePlan?.label, planRef);
-    const name = firstNonEmptyString(planData?.name, planData?.title, sourcePlan?.label);
-    const description = firstNonEmptyString(planData?.description, planData?.summary);
-    const category = normalizeCategory(sourcePlan?.category, planData?.category);
-
-    return {
-        format: 'riotplan-transfer',
-        version: 1,
-        exportedAt: new Date().toISOString(),
-        source: {
-            serverUrl: currentServerUrl,
-            planRef,
-        },
-        plan: {
-            code,
-            name,
-            description,
-            category,
-            stage: firstNonEmptyString(sourcePlan?.stage, planData?.stage),
-            project: sourcePlan?.project || planData?.project,
-            ideaContent: typeof ideaArtifact?.content === 'string' ? ideaArtifact.content : null,
-        },
-    };
-}
-
 function sanitizeFileName(input: string): string {
     return input.replace(/[^a-z0-9._-]+/gi, '-').replace(/-+/g, '-').replace(/^-|-$/g, '').toLowerCase() || 'plan';
 }
@@ -1089,22 +1678,23 @@ function sanitizePlanCode(input: string): string {
         .replace(/^-|-$/g, '');
 }
 
-function firstNonEmptyString(...values: unknown[]): string | undefined {
-    for (const value of values) {
-        if (typeof value === 'string' && value.trim()) {
-            return value.trim();
-        }
-    }
-    return undefined;
+async function hydrateProfileApiKeys(context: vscode.ExtensionContext, profiles: Array<{ id: string }>): Promise<void> {
+    await Promise.all(profiles.map(async (profile) => {
+        const secret = await context.secrets.get(tokenStorageKey(profile.id));
+        connectionManager.setClientApiKey(profile.id, sanitizeToken(secret));
+    }));
 }
 
-function normalizeCategory(...values: unknown[]): PlanCategory {
-    for (const value of values) {
-        if (value === 'active' || value === 'done' || value === 'hold') {
-            return value;
+function getLegacyServerUrl(): string {
+    const folderUri = vscode.workspace.workspaceFolders?.[0]?.uri;
+    if (folderUri) {
+        const folderValue = vscode.workspace.getConfiguration('riotplan', folderUri).get<string>('serverUrl');
+        if (typeof folderValue === 'string' && folderValue.trim()) {
+            return folderValue.trim();
         }
     }
-    return 'active';
+    const globalValue = vscode.workspace.getConfiguration('riotplan').get<string>('serverUrl', 'http://127.0.0.1:3002');
+    return globalValue.trim() || 'http://127.0.0.1:3002';
 }
 
 export function deactivate() {
