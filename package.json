@@ -2,7 +2,7 @@
   "name": "riotplan-vscode",
   "displayName": "RiotPlan",
   "description": "Plan management for RiotPlan HTTP server",
-  "version": "1.0.9",
+  "version": "1.0.10",
   "publisher": "kjerneverk",
   "engines": {
     "vscode": "^1.60.0"
@@ -12,6 +12,7 @@
   ],
   "activationEvents": [
     "onStartupFinished",
+    "onCommand:riotplan.debugServerAuth",
     "onCommand:riotplan.transferPlan",
     "onCommand:riotplan.openServerManager",
     "onCommand:riotplan.addServerConnection",
@@ -85,6 +86,12 @@
           "type": "boolean",
           "default": false,
           "description": "Global fallback proxy bypass. Prefer per-profile proxyBypass in riotplan.serverProfiles."
+        },
+        "riotplan.debugAuthLogging": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable verbose request logging for token/auth header debugging (redacted values).",
+          "markdownDescription": "When enabled, logs each RiotPlan HTTP/SSE request with redacted auth-header presence to the `RiotPlan Auth Debug` output channel."
         }
       }
     },
@@ -211,6 +218,12 @@
         "category": "RiotPlan"
       },
       {
+        "command": "riotplan.debugServerAuth",
+        "title": "Debug Server Auth Headers",
+        "icon": "$(bug)",
+        "category": "RiotPlan"
+      },
+      {
         "command": "riotplan.reconnect",
         "title": "Reconnect",
         "icon": "$(plug)"
@@ -234,6 +247,16 @@
         "command": "riotplan.openProjectEntity",
         "title": "Open Project Details",
         "icon": "$(symbol-structure)"
+      },
+      {
+        "command": "riotplan.deletePlan",
+        "title": "Delete Plan",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "riotplan.renamePlan",
+        "title": "Rename Plan",
+        "icon": "$(edit)"
       }
     ],
     "menus": {
@@ -302,6 +325,11 @@
           "command": "riotplan.reconnect",
           "when": "view == riotplan-connection",
           "group": "navigation"
+        },
+        {
+          "command": "riotplan.debugServerAuth",
+          "when": "view == riotplan-connection",
+          "group": "navigation"
         }
       ],
       "view/item/context": [
@@ -334,6 +362,16 @@
           "command": "riotplan.transferPlan",
           "when": "view == riotplan-plans && viewItem == plan",
           "group": "navigation@6"
+        },
+        {
+          "command": "riotplan.renamePlan",
+          "when": "view == riotplan-plans && viewItem == plan",
+          "group": "navigation@7"
+        },
+        {
+          "command": "riotplan.deletePlan",
+          "when": "view == riotplan-plans && viewItem == plan",
+          "group": "danger@1"
         },
         {
           "command": "riotplan.openProjectEntity",

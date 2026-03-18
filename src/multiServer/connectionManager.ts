@@ -4,6 +4,7 @@ import { ServerProfile, ServerRuntimeStatus } from './types';
 export class MultiServerConnectionManager {
     private readonly clients = new Map<string, HttpMcpClient>();
     private readonly statuses = new Map<string, ServerRuntimeStatus>();
+    private readonly apiKeys = new Map<string, string | undefined>();
     private profiles: ServerProfile[] = [];
     private activeServerId?: string;
 
@@ -47,6 +48,7 @@ export class MultiServerConnectionManager {
     }
 
     setClientApiKey(serverId: string, apiKey?: string): void {
+        this.apiKeys.set(serverId, apiKey);
         const client = this.clients.get(serverId);
         if (!client) {
             return;
@@ -87,7 +89,7 @@ export class MultiServerConnectionManager {
             serverUrl: profile.url,
         });
 
-        const client = new HttpMcpClient(profile.url, undefined, profile.proxyBypass);
+        const client = new HttpMcpClient(profile.url, this.apiKeys.get(serverId), profile.proxyBypass);
         try {
             const verification = await client.verifyRiotPlanServer();
             const status: ServerRuntimeStatus = {

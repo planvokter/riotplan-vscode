@@ -5,7 +5,7 @@
  */
 
 import * as vscode from 'vscode';
-import { HttpMcpClient } from './mcp-client';
+import { HttpMcpClient, isUnauthorizedError } from './mcp-client';
 
 export type PlanCategory = 'active' | 'done' | 'hold';
 export type PlanSortOrder = 'name-asc' | 'name-desc' | 'stage-asc' | 'progress-desc' | 'progress-asc';
@@ -165,6 +165,9 @@ export class PlansTreeProvider implements vscode.TreeDataProvider<PlanItem>, vsc
                 }
                 return group.plans.map((plan: any) => this.toPlanItem(plan, category));
             } catch (error) {
+                if (isUnauthorizedError(error)) {
+                    return [];
+                }
                 console.error('Failed to load plans:', error);
                 return [];
             }
@@ -195,6 +198,9 @@ export class PlansTreeProvider implements vscode.TreeDataProvider<PlanItem>, vsc
                     )
             );
         } catch (error) {
+            if (isUnauthorizedError(error)) {
+                return [];
+            }
             console.error('Failed to load plans:', error);
             return [];
         }

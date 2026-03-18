@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { HttpMcpClient } from './mcp-client';
+import { HttpMcpClient, isUnauthorizedError } from './mcp-client';
 
 interface ContextProject {
     id?: string;
@@ -58,6 +58,9 @@ export class ProjectsTreeProvider implements vscode.TreeDataProvider<ProjectItem
                 })
                 .map((project: ContextProject) => new ProjectItem(project));
         } catch (error) {
+            if (isUnauthorizedError(error)) {
+                return [];
+            }
             console.error('Failed to load projects:', error);
             return [];
         }

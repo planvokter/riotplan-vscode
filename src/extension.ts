@@ -73,6 +73,7 @@ let extensionContextRef: vscode.ExtensionContext;
 let currentProxyBypass = false;
 const PLAN_LIST_AUTO_REFRESH_MS = 5 * 60 * 1000;
 const PLAN_DETAIL_AUTO_REFRESH_MS = 2 * 60 * 1000;
+const AUTH_DEBUG_CHANNEL_NAME = 'RiotPlan Auth Debug';
 
 export async function activate(context: vscode.ExtensionContext) {
     console.log('RiotPlan extension is now active');
@@ -90,6 +91,8 @@ export async function activate(context: vscode.ExtensionContext) {
     statusProvider = new StatusTreeProvider(mcpClient, currentServerUrl);
     dashboardProvider = new DashboardViewProvider(context.extensionUri);
     dashboardProvider.setClient(aggregator as any);
+    const authDebugChannel = vscode.window.createOutputChannel(AUTH_DEBUG_CHANNEL_NAME);
+    context.subscriptions.push(authDebugChannel);
 
     function syncDashboardFilters(): void {
         dashboardProvider.setFilters({
@@ -99,7 +102,26 @@ export async function activate(context: vscode.ExtensionContext) {
         });
     }
 
+    function isAuthDebugLoggingEnabled(): boolean {
+        return vscode.workspace.getConfiguration('riotplan').get<boolean>('debugAuthLogging', false);
+    }
+
+    function applyAuthDebugLogging(): void {
+        const enabled = isAuthDebugLoggingEnabled();
+        const logger = enabled
+            ? (line: string) => authDebugChannel.appendLine(line)
+            : undefined;
+        mcpClient.setRequestDebugLogger(logger);
+        for (const profile of connectionManager.getProfiles()) {
+            connectionManager.getClient(profile.id)?.setRequestDebugLogger(logger);
+        }
+        if (enabled) {
+            authDebugChannel.appendLine(`[${new Date().toISOString()}] Auth request logging is enabled.`);
+        }
+    }
+
     syncDashboardFilters();
+    applyAuthDebugLogging();
 
     async function refreshServerStatuses(): Promise<void> {
         const profileMap = new Map(connectionManager.getProfiles().map((profile) => [profile.id, profile]));
@@ -124,6 +146,7 @@ export async function activate(context: vscode.ExtensionContext) {
         currentServerUrl = newUrl;
         currentProxyBypass = proxyBypass ?? currentProxyBypass;
         mcpClient = new HttpMcpClient(newUrl, undefined, currentProxyBypass);
+        applyAuthDebugLogging();
         plansProvider.updateClient(aggregator as any);
         statusProvider.updateClient(mcpClient, newUrl);
         dashboardProvider.setClient(aggregator as any);
@@ -148,6 +171,7 @@ export async function activate(context: vscode.ExtensionContext) {
             connectionManager.configureProfiles(profiles, configuredActiveServerId);
             await hydrateProfileApiKeys(context, profiles);
             await connectionManager.connectAll();
+            applyAuthDebugLogging();
             aggregator = new MultiServerAggregator(connectionManager);
 
             let nextActiveServerId: string | undefined = configuredActiveServerId;
@@ -164,6 +188,7 @@ export async function activate(context: vscode.ExtensionContext) {
                 mcpClient = activeClient;
                 currentServerUrl = mcpClient.baseUrl;
             }
+            applyAuthDebugLogging();
 
             plansProvider.updateClient(aggregator as any);
             projectsProvider.updateClient(aggregator as any);
@@ -445,6 +470,12 @@ export async function activate(context: vscode.ExtensionContext) {
     );
 
     context.subscriptions.push(
+        vscode.commands.registerCommand('riotplan.debugServerAuth', async (serverId?: string) => {
+            await debugServerAuth(serverId);
+        })
+    );
+
+    context.subscriptions.push(
         vscode.commands.registerCommand('riotplan.configureApiKey', async (serverId?: string) => {
             const profile = serverId
                 ? connectionManager.getProfiles().find((entry) => entry.id === serverId)
@@ -613,6 +644,84 @@ export async function activate(context: vscode.ExtensionContext) {
         }
     }
 
+    async function debugServerAuth(serverId?: string): Promise<void> {
+        let selected: { id: string; name: string; url: string } | undefined;
+        if (serverId) {
+            const profile = connectionManager.getProfiles().find((entry) => entry.id === serverId);
+            if (profile) {
+                selected = { id: profile.id, name: profile.name, url: profile.url };
+            }
+        }
+        if (!selected) {
+            selected = await pickServerProfile('Debug auth token delivery');
+        }
+        if (!selected) {
+            return;
+        }
+
+        applyAuthDebugLogging();
+        authDebugChannel.appendLine('');
+        authDebugChannel.appendLine(`[${new Date().toISOString()}] --- Debug auth for ${selected.name} (${selected.id}) ---`);
+        authDebugChannel.appendLine(`Configured URL: ${selected.url}`);
+
+        const secret = await context.secrets.get(tokenStorageKey(selected.id));
+        const sanitizedSecret = sanitizeToken(secret);
+        authDebugChannel.appendLine(
+            `Secret storage token: ${sanitizedSecret ? `present (len=${sanitizedSecret.length}, last4=${tokenLast4(sanitizedSecret)})` : 'missing'}`
+        );
+
+        let client = connectionManager.getClient(selected.id);
+        if (!client) {
+            authDebugChannel.appendLine('No client found in memory for this server; connecting now...');
+            await connectionManager.connect(selected.id);
+            client = connectionManager.getClient(selected.id);
+            applyAuthDebugLogging();
+        }
+        if (!client) {
+            authDebugChannel.appendLine('Unable to create client for selected server.');
+            authDebugChannel.show(true);
+            vscode.window.showErrorMessage(`Could not create an MCP client for "${selected.name}".`);
+            return;
+        }
+
+        const before = client.getAuthDebugState();
+        authDebugChannel.appendLine(
+            `Client token state before probe: present=${before.hasApiKey}, preview=${before.tokenPreview}, len=${before.tokenLength}`
+        );
+        authDebugChannel.appendLine(
+            `Client session before probe: present=${before.hasSessionId}, preview=${before.sessionIdPreview}`
+        );
+        authDebugChannel.appendLine('Probe: sending tools/list request...');
+
+        const hasGlobalDebugLogging = isAuthDebugLoggingEnabled();
+        if (!hasGlobalDebugLogging) {
+            client.setRequestDebugLogger((line: string) => authDebugChannel.appendLine(line));
+        }
+        try {
+            const result = await client.sendRequest('tools/list');
+            const tools = Array.isArray(result?.tools) ? result.tools : [];
+            authDebugChannel.appendLine(`Probe result: success (${tools.length} tool${tools.length === 1 ? '' : 's'} returned).`);
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            authDebugChannel.appendLine(`Probe result: failed (${message})`);
+        } finally {
+            if (!hasGlobalDebugLogging) {
+                client.setRequestDebugLogger(undefined);
+            }
+        }
+
+        const after = client.getAuthDebugState();
+        authDebugChannel.appendLine(
+            `Client token state after probe: present=${after.hasApiKey}, preview=${after.tokenPreview}, len=${after.tokenLength}`
+        );
+        authDebugChannel.appendLine(
+            `Client session after probe: present=${after.hasSessionId}, preview=${after.sessionIdPreview}`
+        );
+
+        authDebugChannel.show(true);
+        vscode.window.showInformationMessage(`Auth debug output opened for "${selected.name}".`);
+    }
+
     async function removeServerConnection(): Promise<void> {
         const selected = await pickServerProfile('Remove server connection');
         if (!selected) {
@@ -739,6 +848,7 @@ export async function activate(context: vscode.ExtensionContext) {
             return;
         }
 
+        let moveCleanupError: string | undefined;
         await vscode.window.withProgress(
             {
                 location: vscode.ProgressLocation.Notification,
@@ -746,21 +856,23 @@ export async function activate(context: vscode.ExtensionContext) {
                 cancellable: false,
             },
             async (progress) => {
-                progress.report({ message: 'Downloading from source server...' });
+                progress.report({ message: 'Downloading plan from source...' });
                 const downloaded = await sourceClient.downloadPlanFile(planRef);
-                const candidateCode = resolvePlanCodeCandidate(plan, scopedPlanRef, downloaded.filename);
+                const candidateCode = sanitizePlanCode(
+                    plan?.label || plan?.name || plan?.code || planRef
+                ) || 'transferred-plan';
 
                 progress.report({ message: 'Checking target conflicts...' });
                 const targetListResponse = await targetClient.listPlans('all');
                 const targetPlans = JSON.parse(String(targetListResponse?.content?.[0]?.text || '{"plans": []}')).plans || [];
                 const conflictingPlanRef = findTargetPlanConflict(targetPlans, candidateCode);
 
-                let uploadFilename = downloaded.filename;
+                let targetCode = candidateCode;
                 if (conflictingPlanRef) {
                     const conflictAction = await vscode.window.showQuickPick(
                         [
-                            { label: 'Overwrite', value: 'overwrite' as const, description: 'Delete existing target plan then upload' },
-                            { label: 'Rename', value: 'rename' as const, description: 'Upload with a new plan filename' },
+                            { label: 'Overwrite', value: 'overwrite' as const, description: 'Remove existing target plan then create' },
+                            { label: 'Rename', value: 'rename' as const, description: 'Create with a new plan code' },
                             { label: 'Skip', value: 'skip' as const, description: 'Cancel transfer for this plan' },
                         ],
                         {
@@ -774,11 +886,11 @@ export async function activate(context: vscode.ExtensionContext) {
                     }
                     if (conflictAction.value === 'overwrite') {
                         progress.report({ message: 'Removing conflicting plan on target...' });
-                        await targetClient.deletePlan(conflictingPlanRef);
+                        await deletePlanBestEffort(targetClient, conflictingPlanRef);
                     } else if (conflictAction.value === 'rename') {
                         const renamed = await vscode.window.showInputBox({
                             title: 'Rename transferred plan',
-                            prompt: 'Enter a new plan code/filename',
+                            prompt: 'Enter a new plan code',
                             value: `${candidateCode}-copy`,
                             ignoreFocusOut: true,
                             validateInput: (value) => (sanitizePlanCode(value).length > 0 ? null : 'Enter a valid name'),
@@ -786,16 +898,20 @@ export async function activate(context: vscode.ExtensionContext) {
                         if (!renamed?.trim()) {
                             return;
                         }
-                        uploadFilename = `${sanitizePlanCode(renamed)}.plan`;
+                        targetCode = sanitizePlanCode(renamed);
                     }
                 }
 
-                progress.report({ message: `Uploading to ${targetProfile.name}...` });
+                const uploadFilename = `${sanitizeFileName(targetCode)}.plan`;
+                progress.report({ message: `Uploading plan file to ${targetProfile.name}...` });
                 await targetClient.uploadPlanFile(uploadFilename, downloaded.content);
 
                 if (modeSelection.mode === 'move') {
                     progress.report({ message: 'Removing source plan...' });
-                    await sourceClient.deletePlan(planRef);
+                    const deleteError = await deletePlanWithReport(sourceClient, planRef);
+                    if (deleteError) {
+                        moveCleanupError = deleteError;
+                    }
                 }
             }
         );
@@ -803,8 +919,14 @@ export async function activate(context: vscode.ExtensionContext) {
         plansProvider.refresh();
         projectsProvider.refresh();
         await refreshServerStatuses();
-        const modeLabel = modeSelection.mode === 'move' ? 'Moved' : 'Copied';
-        vscode.window.showInformationMessage(`${modeLabel} plan to "${targetProfile.name}".`);
+        if (moveCleanupError) {
+            vscode.window.showWarningMessage(
+                `Plan copied to "${targetProfile.name}", but removing source failed: ${moveCleanupError}`
+            );
+        } else {
+            const modeLabel = modeSelection.mode === 'move' ? 'Moved' : 'Copied';
+            vscode.window.showInformationMessage(`${modeLabel} plan to "${targetProfile.name}".`);
+        }
         if (sourceServer) {
             void checkConnection(sourceServer.url);
         }
@@ -1143,6 +1265,57 @@ export async function activate(context: vscode.ExtensionContext) {
     );
 
     context.subscriptions.push(
+        vscode.commands.registerCommand('riotplan.deletePlan', async (plan: PlanSelectionInput, selections?: PlanSelectionInput[]) => {
+            const selectedPlans = uniquePlanItems(plan, selections);
+            if (selectedPlans.length === 0) {
+                vscode.window.showWarningMessage('Unable to determine plan reference for this item.');
+                return;
+            }
+            const planNames = selectedPlans
+                .map((entry) => entry?.label || resolvePlanRef(entry) || 'unknown')
+                .join(', ');
+            const confirmation = await vscode.window.showWarningMessage(
+                selectedPlans.length === 1
+                    ? `Delete plan "${planNames}"? This cannot be undone.`
+                    : `Delete ${selectedPlans.length} plans (${planNames})? This cannot be undone.`,
+                { modal: true },
+                'Delete',
+                'Cancel'
+            );
+            if (confirmation !== 'Delete') {
+                return;
+            }
+            let deleted = 0;
+            const failures: string[] = [];
+            for (const item of selectedPlans) {
+                const scopedRef = resolvePlanRef(item);
+                if (!scopedRef) {
+                    continue;
+                }
+                const { client, planRef } = resolvePlanClientAndRef(scopedRef);
+                try {
+                    await client.deletePlan(planRef);
+                    deleted += 1;
+                } catch (error) {
+                    const message = error instanceof Error ? error.message : String(error);
+                    failures.push(`${item?.label || planRef}: ${message}`);
+                }
+            }
+            plansProvider.refresh();
+            projectsProvider.refresh();
+            if (failures.length > 0) {
+                vscode.window.showErrorMessage(
+                    `Deleted ${deleted}, failed ${failures.length}: ${failures.join('; ')}`
+                );
+            } else {
+                vscode.window.showInformationMessage(
+                    deleted === 1 ? 'Plan deleted.' : `${deleted} plans deleted.`
+                );
+            }
+        })
+    );
+
+    context.subscriptions.push(
         vscode.commands.registerCommand('riotplan.openPlanDetails', async (plan: PlanSelectionInput, selections?: PlanSelectionInput[]) => {
             const selectedItems = uniquePlanItems(plan, selections);
             if (selectedItems.length === 0) {
@@ -1205,6 +1378,9 @@ export async function activate(context: vscode.ExtensionContext) {
             ) {
                 void reloadConnectionsFromProfiles();
             }
+            if (e.affectsConfiguration('riotplan.debugAuthLogging')) {
+                applyAuthDebugLogging();
+            }
         })
     );
 
@@ -1217,6 +1393,7 @@ export async function activate(context: vscode.ExtensionContext) {
         connectionManager.configureProfiles(profiles, activeServerId);
         await hydrateProfileApiKeys(context, profiles);
         await connectionManager.connectAll();
+        applyAuthDebugLogging();
         aggregator = new MultiServerAggregator(connectionManager);
 
         const activeClient = connectionManager.getActiveClient();
@@ -1224,6 +1401,7 @@ export async function activate(context: vscode.ExtensionContext) {
             mcpClient = activeClient;
             currentServerUrl = mcpClient.baseUrl;
         }
+        applyAuthDebugLogging();
 
         plansProvider.updateClient(aggregator as any);
         projectsProvider.updateClient(aggregator as any);
@@ -1356,6 +1534,17 @@ async function checkConnection(serverUrl: string): Promise<void> {
                 `Server at ${serverUrl} is reachable but does not appear to be a RiotPlan MCP server (missing riotplan_* tools). ` +
                 `Check riotplan.serverUrl in settings.`
             );
+        } else if (result.reason === 'unauthorized') {
+            const action = await vscode.window.showWarningMessage(
+                `RiotPlan server at ${serverUrl} rejected authentication (HTTP 401). Configure an API token for the active server.`,
+                'Configure API token',
+                'Manage Servers and Tokens'
+            );
+            if (action === 'Configure API token') {
+                await vscode.commands.executeCommand('riotplan.configureApiKey');
+            } else if (action === 'Manage Servers and Tokens') {
+                await vscode.commands.executeCommand('riotplan.openServerManager');
+            }
         } else {
             vscode.window.showWarningMessage(
                 `RiotPlan server not available at ${serverUrl}. Please start the server and reload the window.`
@@ -1676,6 +1865,55 @@ function sanitizePlanCode(input: string): string {
         .replace(/[^a-z0-9-]+/g, '-')
         .replace(/-+/g, '-')
         .replace(/^-|-$/g, '');
+}
+
+async function deletePlanBestEffort(client: HttpMcpClient, planRefOrPath: string): Promise<void> {
+    const candidates = planDeleteCandidates(planRefOrPath);
+    for (const id of candidates) {
+        try {
+            await client.deletePlan(id);
+            return;
+        } catch {
+            // Try next candidate.
+        }
+    }
+}
+
+async function deletePlanWithReport(client: HttpMcpClient, planRefOrPath: string): Promise<string | undefined> {
+    const candidates = planDeleteCandidates(planRefOrPath);
+    let lastError: string | undefined;
+    for (const id of candidates) {
+        try {
+            await client.deletePlan(id);
+            return undefined;
+        } catch (error) {
+            lastError = error instanceof Error ? error.message : String(error);
+        }
+    }
+    return lastError || `Could not delete plan: ${planRefOrPath}`;
+}
+
+function planDeleteCandidates(value: string): string[] {
+    const trimmed = value.trim();
+    const results: string[] = [trimmed];
+    const parts = trimmed.split(/[\\/]+/).filter(Boolean);
+    if (parts.length > 1) {
+        results.push(parts[parts.length - 1]);
+    }
+    const uuidMatch = trimmed.match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
+    if (uuidMatch) {
+        results.push(uuidMatch[1]);
+    }
+    return [...new Set(results)];
+}
+
+
+function tokenLast4(token: string): string {
+    const trimmed = token.trim();
+    if (!trimmed) {
+        return 'none';
+    }
+    return trimmed.slice(-Math.min(4, trimmed.length));
 }
 
 async function hydrateProfileApiKeys(context: vscode.ExtensionContext, profiles: Array<{ id: string }>): Promise<void> {

@@ -27,6 +27,23 @@ interface McpResponse {
     };
 }
 
+interface AuthDebugState {
+    hasApiKey: boolean;
+    tokenLength: number;
+    tokenPreview: string;
+    hasSessionId: boolean;
+    sessionIdPreview: string;
+}
+
+export function isUnauthorizedError(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error || '');
+    const normalized = message.toLowerCase();
+    return normalized.includes('http 401')
+        || normalized.includes('"error_code":"unauthorized"')
+        || normalized.includes('missing or invalid api key')
+        || normalized.includes('unauthorized');
+}
+
 function getToolErrorText(result: any): string | null {
     if (!result || !result.isError) {
         return null;
@@ -45,6 +62,7 @@ export class HttpMcpClient {
     private notificationHandlers: Map<string, Array<(data: unknown) => void>> = new Map();
     private recoveringSession = false;
     private onSessionRecoveredCallbacks: Array<() => void | Promise<void>> = [];
+    private requestDebugLogger?: (line: string) => void;
 
     constructor(
         private serverUrl: string,
@@ -58,6 +76,22 @@ export class HttpMcpClient {
 
     setApiKey(apiKey?: string): void {
         this.apiKey = apiKey?.trim() || undefined;
+    }
+
+    setRequestDebugLogger(logger?: (line: string) => void): void {
+        this.requestDebugLogger = logger;
+    }
+
+    getAuthDebugState(): AuthDebugState {
+        const apiKey = this.apiKey?.trim() || '';
+        const sessionId = this.sessionId?.trim() || '';
+        return {
+            hasApiKey: Boolean(apiKey),
+            tokenLength: apiKey.length,
+            tokenPreview: this.maskSecret(apiKey),
+            hasSessionId: Boolean(sessionId),
+            sessionIdPreview: this.maskSecret(sessionId),
+        };
     }
 
     onSessionRecovered(callback: () => void | Promise<void>): () => void {
@@ -172,6 +206,10 @@ export class HttpMcpClient {
 
             const postData = JSON.stringify(body);
             const proxyAgent = getProxyAgent(url.toString(), this.proxyBypass);
+            const authHeaders = this.getAuthHeaders();
+            this.logRequestDebug(
+                `HTTP POST ${url.pathname} auth=${this.describeAuthHeaders(authHeaders)} session=${this.maskSecret(this.sessionId)}`
+            );
 
             const options: http.RequestOptions = {
                 hostname: url.hostname,
@@ -184,7 +222,7 @@ export class HttpMcpClient {
                     'Accept': 'application/json, text/event-stream',
                     'Content-Length': Buffer.byteLength(postData),
                     ...(this.sessionId ? { 'Mcp-Session-Id': this.sessionId } : {}),
-                    ...this.getAuthHeaders(),
+                    ...authHeaders,
                 },
                 ...(proxyAgent ? { agent: proxyAgent } : {}),
             };
@@ -198,6 +236,7 @@ export class HttpMcpClient {
 
                 res.on('end', () => {
                     try {
+                        this.logRequestDebug(`HTTP POST ${url.pathname} -> ${res.statusCode || 0}`);
                         if (res.statusCode === 202) {
                             resolve({ data: { jsonrpc: '2.0', id: body.id, result: {} }, headers: res.headers });
                             return;
@@ -218,6 +257,7 @@ export class HttpMcpClient {
             });
 
             req.on('error', (error) => {
+                this.logRequestDebug(`HTTP POST ${url.pathname} error=${error.message}`);
                 reject(error);
             });
 
@@ -240,6 +280,10 @@ export class HttpMcpClient {
             const isHttps = url.protocol === 'https:';
             const client = isHttps ? https : http;
             const proxyAgent = getProxyAgent(url.toString(), this.proxyBypass);
+            const authHeaders = this.getAuthHeaders();
+            this.logRequestDebug(
+                `HTTP ${method} ${url.pathname}${url.search} auth=${this.describeAuthHeaders(authHeaders)} session=${this.maskSecret(this.sessionId)}`
+            );
             const req = client.request(
                 {
                     hostname: url.hostname,
@@ -247,7 +291,7 @@ export class HttpMcpClient {
                     path: url.pathname + url.search,
                     method,
                     headers: {
-                        ...this.getAuthHeaders(),
+                        ...authHeaders,
                         ...(options?.headers || {}),
                     },
                     ...(proxyAgent ? { agent: proxyAgent } : {}),
@@ -258,6 +302,7 @@ export class HttpMcpClient {
                     res.on('end', () => {
                         const body = Buffer.concat(chunks);
                         const statusCode = res.statusCode || 0;
+                        this.logRequestDebug(`HTTP ${method} ${url.pathname}${url.search} -> ${statusCode}`);
                         if (statusCode < 200 || statusCode >= 300) {
                             reject(new Error(`HTTP ${statusCode}: ${body.toString('utf8')}`));
                             return;
@@ -266,7 +311,10 @@ export class HttpMcpClient {
                     });
                 }
             );
-            req.on('error', reject);
+            req.on('error', (error) => {
+                this.logRequestDebug(`HTTP ${method} ${url.pathname}${url.search} error=${error.message}`);
+                reject(error);
+            });
             req.setTimeout(options?.timeoutMs ?? 30000, () => {
                 req.destroy(new Error(`HTTP ${method} ${path} timed out`));
             });
@@ -378,27 +426,40 @@ export class HttpMcpClient {
             throw new Error('Plan identifier is required to delete a plan.');
         }
 
-        const attempts: Array<Record<string, unknown>> = [
-            { action: 'delete', planId: trimmed },
-            { action: 'delete', path: trimmed },
-            { action: 'remove', planId: trimmed },
-            { action: 'remove', path: trimmed },
-        ];
-
+        const identifiers = this.planIdentifierCandidates(trimmed);
         let lastError: unknown;
-        for (const args of attempts) {
+
+        // Try riotplan_plan delete first (permanently removes the .plan file).
+        for (const id of identifiers) {
             try {
                 const result = await this.sendRequest('tools/call', {
                     name: 'riotplan_plan',
-                    arguments: args,
+                    arguments: { action: 'delete', planId: id, confirm: true },
                 });
-                const toolErrorText = getToolErrorText(result);
-                if (toolErrorText) {
-                    throw new Error(toolErrorText);
+                const toolError = getToolErrorText(result);
+                if (toolError) {
+                    throw new Error(toolError);
                 }
                 return result;
             } catch (error) {
                 lastError = error;
+            }
+        }
+
+        // Fallback: try the standalone riotplan_delete_plan tool.
+        for (const id of identifiers) {
+            try {
+                const result = await this.sendRequest('tools/call', {
+                    name: 'riotplan_delete_plan',
+                    arguments: { planId: id, confirm: true },
+                });
+                const toolError = getToolErrorText(result);
+                if (toolError) {
+                    throw new Error(toolError);
+                }
+                return result;
+            } catch {
+                // Try next candidate.
             }
         }
 
@@ -445,10 +506,11 @@ export class HttpMcpClient {
     }
 
     async uploadPlanFile(filename: string, content: Buffer): Promise<any> {
+        const safeFilename = this.sanitizeUploadFilename(filename);
         const boundary = `----riotplan-vscode-${Date.now().toString(16)}`;
         const preamble = Buffer.from(
             `--${boundary}\r\n` +
-                `Content-Disposition: form-data; name="plan"; filename="${filename}"\r\n` +
+                `Content-Disposition: form-data; name="plan"; filename="${safeFilename}"\r\n` +
                 `Content-Type: application/octet-stream\r\n\r\n`,
             'utf8'
         );
@@ -471,6 +533,37 @@ export class HttpMcpClient {
         } catch {
             return { success: true, raw: text };
         }
+    }
+
+
+    private planIdentifierCandidates(value: string): string[] {
+        const candidates: string[] = [];
+        const uuidMatch = value.match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
+        if (uuidMatch) {
+            candidates.push(uuidMatch[1]);
+        }
+        const parts = value.split(/[\\/]+/).filter(Boolean);
+        if (parts.length > 1) {
+            const basenameVal = parts[parts.length - 1];
+            if (basenameVal) {
+                candidates.push(basenameVal);
+            }
+        }
+        candidates.push(value);
+        return [...new Set(candidates)];
+    }
+
+    private sanitizeUploadFilename(filename: string): string {
+        const raw = typeof filename === 'string' ? filename.trim() : '';
+        const basenameOnly = raw.split(/[\\/]+/).filter(Boolean).pop() || 'plan.plan';
+        const cleaned = basenameOnly
+            .replace(/[^a-z0-9._-]+/gi, '-')
+            .replace(/-+/g, '-')
+            .replace(/^-|-$/g, '');
+        if (!cleaned) {
+            return 'plan.plan';
+        }
+        return cleaned.toLowerCase().endsWith('.plan') ? cleaned : `${cleaned}.plan`;
     }
 
     private async callToolWithArgFallback(
@@ -828,6 +921,11 @@ export class HttpMcpClient {
     }
 
     async healthCheck(): Promise<boolean> {
+        const statusCode = await this.healthCheckStatus();
+        return statusCode === 200;
+    }
+
+    private async healthCheckStatus(): Promise<number | undefined> {
         try {
             const url = new URL(this.serverUrl + '/health');
             const isHttps = url.protocol === 'https:';
@@ -839,34 +937,55 @@ export class HttpMcpClient {
                     headers: this.getAuthHeaders(),
                     ...(proxyAgent ? { agent: proxyAgent } : {}),
                 }, (res) => {
-                    resolve(res.statusCode === 200);
+                    resolve(res.statusCode);
                 });
 
                 req.on('error', () => {
-                    resolve(false);
+                    resolve(undefined);
                 });
 
                 req.setTimeout(5000, () => {
                     req.destroy();
-                    resolve(false);
+                    resolve(undefined);
                 });
             });
         } catch {
-            return false;
+            return undefined;
         }
     }
 
     async verifyRiotPlanServer(): Promise<{ ok: boolean; reason?: string }> {
-        const healthy = await this.healthCheck();
-        if (!healthy) {
+        const healthStatus = await this.healthCheckStatus();
+        if (healthStatus === 401) {
+            return { ok: false, reason: 'unauthorized' };
+        }
+        if (healthStatus !== 200) {
             return { ok: false, reason: 'server_unreachable' };
         }
-        const tools = await this.listAvailableToolNamesSafe();
+        const tools = await this.listAvailableToolNamesForVerification();
+        if (tools === null) {
+            return { ok: false, reason: 'unauthorized' };
+        }
         const hasRiotPlanTool = tools.some((name) => name.startsWith('riotplan_'));
         if (!hasRiotPlanTool) {
             return { ok: false, reason: 'missing_riotplan_tools' };
         }
         return { ok: true };
+    }
+
+    private async listAvailableToolNamesForVerification(): Promise<string[] | null> {
+        try {
+            const result = await this.sendRequest('tools/list');
+            const rawTools = Array.isArray(result?.tools) ? result.tools : [];
+            return rawTools
+                .map((tool: any) => (typeof tool?.name === 'string' ? tool.name : ''))
+                .filter((name: string) => Boolean(name));
+        } catch (error) {
+            if (isUnauthorizedError(error)) {
+                return null;
+            }
+            return [];
+        }
     }
 
     private async listAvailableToolNamesSafe(): Promise<string[]> {
@@ -966,6 +1085,10 @@ export class HttpMcpClient {
         const isHttps = url.protocol === 'https:';
         const client = isHttps ? https : http;
         const proxyAgent = getProxyAgent(url.toString(), this.proxyBypass);
+        const authHeaders = this.getAuthHeaders();
+        this.logRequestDebug(
+            `SSE GET ${url.pathname} auth=${this.describeAuthHeaders(authHeaders)} session=${this.maskSecret(this.sessionId)}`
+        );
         const req = client.request(
             {
                 hostname: url.hostname,
@@ -976,11 +1099,12 @@ export class HttpMcpClient {
                     Accept: 'text/event-stream',
                     'Cache-Control': 'no-cache',
                     'Mcp-Session-Id': this.sessionId,
-                    ...this.getAuthHeaders(),
+                    ...authHeaders,
                 },
                 ...(proxyAgent ? { agent: proxyAgent } : {}),
             },
             (res) => {
+                this.logRequestDebug(`SSE GET ${url.pathname} -> ${res.statusCode || 0}`);
                 if (res.statusCode !== 200) {
                     if (res.statusCode === 404) {
                         void this.recoverSession();
@@ -1007,7 +1131,8 @@ export class HttpMcpClient {
                 });
             }
         );
-        req.on('error', () => {
+        req.on('error', (error) => {
+            this.logRequestDebug(`SSE GET ${url.pathname} error=${error.message}`);
             this.sseConnection = null;
         });
         req.end();
@@ -1054,6 +1179,29 @@ export class HttpMcpClient {
             Authorization: `Bearer ${this.apiKey}`,
             'X-API-Key': this.apiKey,
         };
+    }
+
+    private describeAuthHeaders(headers: Record<string, string>): string {
+        const authorization = headers.Authorization || '';
+        const xApiKey = headers['X-API-Key'] || '';
+        return `Authorization:${authorization ? 'yes' : 'no'}(${this.maskSecret(authorization.replace(/^Bearer\s+/i, ''))}), X-API-Key:${xApiKey ? 'yes' : 'no'}(${this.maskSecret(xApiKey)})`;
+    }
+
+    private maskSecret(value?: string): string {
+        const trimmed = value?.trim() || '';
+        if (!trimmed) {
+            return 'none';
+        }
+        const suffixLength = Math.min(4, trimmed.length);
+        const suffix = trimmed.slice(-suffixLength);
+        return `***${suffix} (len=${trimmed.length})`;
+    }
+
+    private logRequestDebug(line: string): void {
+        if (!this.requestDebugLogger) {
+            return;
+        }
+        this.requestDebugLogger(`[${new Date().toISOString()}] [${this.serverUrl}] ${line}`);
     }
 
     dispose(): void {
