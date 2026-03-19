@@ -417,5 +417,8 @@
   "author": "Tim O'Brien <tobrien@discursive.com>",
   "dependencies": {
     "https-proxy-agent": "^7.0.6"
+  },
+  "publishConfig": {
+    "tag": "dev"
   }
 }
