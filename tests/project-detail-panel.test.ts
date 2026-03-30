@@ -80,7 +80,7 @@ describe('projectMatchesPlan', () => {
                 id: 'plan-ssh',
                 project: {
                     repo: {
-                        url: 'git@github.com:kjerneverk/riotplan.git',
+                        url: 'git@github.com:planvokter/riotplan.git',
                     },
                 },
             }
@@ -104,7 +104,7 @@ describe('projectMatchesPlan', () => {
                 id: 'plan-https',
                 project: {
                     repo: {
-                        url: 'https://github.com/kjerneverk/riotplan-vscode.git',
+                        url: 'https://github.com/planvokter/riotplan-vscode.git',
                     },
                 },
             }

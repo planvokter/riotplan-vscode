@@ -439,7 +439,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/kjerneverk/riotplan-vscode"
+    "url": "https://github.com/planvokter/riotplan-vscode"
   },
   "license": "Apache-2.0",
   "author": "Tim O'Brien <tobrien@discursive.com>",

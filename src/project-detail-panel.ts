@@ -73,6 +73,9 @@ function extractRepoMatchKeys(repo?: ProjectMatchInput['repo']): Set<string> {
         keys.add(`${owner}/${repoName}`);
         keys.add(buildRepoKey(provider, owner, repoName));
     }
+    if (repoName) {
+        keys.add(repoName);
+    }
 
     const url = normalize(repo.url);
     if (url) {
@@ -84,6 +87,7 @@ function extractRepoMatchKeys(repo?: ProjectMatchInput['repo']): Set<string> {
             if (sshOwner && sshRepo) {
                 keys.add(`${sshOwner}/${sshRepo}`);
                 keys.add(buildRepoKey(hostProvider, sshOwner, sshRepo));
+                keys.add(sshRepo);
             }
         }
 
@@ -95,6 +99,7 @@ function extractRepoMatchKeys(repo?: ProjectMatchInput['repo']): Set<string> {
             if (httpOwner && httpRepo) {
                 keys.add(`${httpOwner}/${httpRepo}`);
                 keys.add(buildRepoKey(hostProvider, httpOwner, httpRepo));
+                keys.add(httpRepo);
             }
         }
     }

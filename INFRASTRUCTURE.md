@@ -103,8 +103,8 @@ Requires `VSCE_PAT` secret in GitHub repository settings:
 ## Infrastructure Consistency
 
 This infrastructure matches the patterns used in:
-- `@kjerneverk/riotplan-format`
-- `@kjerneverk/riotplan`
+- `@planvokter/riotplan-format`
+- `@planvokter/riotplan`
 - Other Kjerneverk packages
 
 Key consistency points:
