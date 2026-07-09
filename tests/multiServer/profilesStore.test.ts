@@ -35,11 +35,11 @@ describe('ServerProfilesStore', () => {
     it('bootstraps a default profile from legacy URL when no profiles exist', async () => {
         const store = new ServerProfilesStore();
 
-        const { profiles, activeServerId } = await store.loadProfiles('https://riotplan.getfjell.com', true);
+        const { profiles, activeServerId } = await store.loadProfiles('https://riotplan.example.com', true);
 
         expect(profiles).toHaveLength(1);
         expect(profiles[0].id).toBe('default-server');
-        expect(profiles[0].url).toBe('https://riotplan.getfjell.com');
+        expect(profiles[0].url).toBe('https://riotplan.example.com');
         expect(profiles[0].proxyBypass).toBe(true);
         expect(activeServerId).toBe('default-server');
         expect(updateMock).toHaveBeenCalled();

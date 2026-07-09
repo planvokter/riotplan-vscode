@@ -50,7 +50,7 @@ describe('StatusTreeProvider', () => {
         const provider = new StatusTreeProvider({} as any, 'http://localhost:3002');
         provider.setServerStatuses([
             { serverId: 's1', serverName: 'Local', serverUrl: 'http://127.0.0.1:3002', state: 'connected', hasApiKey: true, isActive: true },
-            { serverId: 's2', serverName: 'Remote', serverUrl: 'https://riotplan.getfjell.com', state: 'disconnected', hasApiKey: false, isActive: false, lastError: 'timeout' },
+            { serverId: 's2', serverName: 'Remote', serverUrl: 'https://riotplan.example.com', state: 'disconnected', hasApiKey: false, isActive: false, lastError: 'timeout' },
         ]);
 
         const items = provider.getChildren();

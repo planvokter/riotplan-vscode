@@ -2,6 +2,8 @@
 
 VSCode extension for managing RiotPlan plans via HTTP MCP server.
 
+Part of the [RiotPlan](https://github.com/planvokter/riotplan) ecosystem — a framework for long-lived, stateful AI plan workflows. This extension is a pure HTTP MCP client: it connects to any running `@planvokter/riotplan-mcp-http` server (local or remote) and surfaces plans and projects inside VS Code.
+
 ## Features
 
 - **Plans Tree View**: Browse plans organized by lifecycle stage (Active, Done, Hold)
